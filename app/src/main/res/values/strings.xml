@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Ai App Studio</string>
+    <string name="studio_title">Ai App Studio</string>
+    <string name="studio_subtitle">Describe the app you want to build</string>
+    <string name="create_new_app">Create New App</string>
+    <string name="create_app_title">Create App</string>
+    <string name="describe_your_app">Describe your app</string>
+    <string name="generate_button">Generate</string>
+    <string name="generating_button">Generating with Gemini AI…</string>
+    <string name="back_button">Back</string>
+    <string name="my_projects_title">My Projects</string>
+    <string name="no_projects_yet">No projects yet</string>
+    <string name="no_screens">No screens</string>
+    <string name="get_started">Get Started</string>
+</resources>

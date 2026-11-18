@@ -1,0 +1,6 @@
+{
+  "name": "Ai App Studio",
+  "description": "Describe any Android app idea to generate complete architecture blueprints, screen flows, and Jetpack Compose code using AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
