@@ -7,6 +7,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -37,11 +38,18 @@ import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CheckCircleOutline
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Download
+import com.example.model.BuildOptions
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FolderZip
@@ -56,6 +64,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -74,6 +83,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -82,6 +92,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.apk.ApkBuilder
@@ -106,6 +118,8 @@ fun ProjectDetailsScreen(
     errorMessage: String? = null,
     appIconState: AppIconUiState = AppIconUiState.Idle,
     onGenerateAppIcon: (AppProject) -> Unit = {},
+    onGenerateCustomAppIcon: ((AppProject, String, String) -> Unit)? = null,
+    onOpenIconStudio: ((String) -> Unit)? = null,
     aiFeatureIdeas: List<AiFeatureIdea> = emptyList(),
     isAnalyzingFeatures: Boolean = false,
     onAnalyzeAiFeatures: (AppProject) -> Unit = {},
@@ -115,6 +129,9 @@ fun ProjectDetailsScreen(
     onRegenerateProject: (String, String) -> Unit = { _, _ -> },
     onUpdateProject: (AppProject) -> Unit = {},
     onLivePreview: (String) -> Unit = {},
+    onConfigureBuild: (String) -> Unit = {},
+    triggerBuildOnResume: Boolean = false,
+    onResetTriggerBuild: () -> Unit = {},
     onDeleteProject: (String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -131,6 +148,9 @@ fun ProjectDetailsScreen(
     var builtApkFile by remember(project?.id) { mutableStateOf<File?>(null) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showRegenerateDialog by remember { mutableStateOf(false) }
+    var showApiKeyValidationDialog by remember { mutableStateOf(false) }
+    val buildLogs = remember(project?.id) { mutableStateOf(listOf<String>()) }
+    var showBuildLogs by remember(project?.id) { mutableStateOf(false) }
     var editedPrompt by remember(project?.prompt) { mutableStateOf(project?.prompt.orEmpty()) }
     var selectedEditScreenIndex by remember(project?.id) { mutableStateOf<Int?>(null) }
     var newSampleItemDraft by remember(project?.id, selectedEditScreenIndex) { mutableStateOf("") }
@@ -214,6 +234,68 @@ fun ProjectDetailsScreen(
                 ) {
                     Text("Cancel")
                 }
+            }
+        )
+    }
+
+    LaunchedEffect(triggerBuildOnResume) {
+        if (triggerBuildOnResume && !isBuildingApk) {
+            onResetTriggerBuild()
+            showApiKeyValidationDialog = true
+        }
+    }
+
+    if (showApiKeyValidationDialog && project != null) {
+        ApiKeyValidationBottomSheet(
+            onDismiss = { showApiKeyValidationDialog = false },
+            onProceedToBuild = {
+                showApiKeyValidationDialog = false
+                if (!isBuildingApk) {
+                    isBuildingApk = true
+                    apkErrorMessage = null
+                    builtApkFile = null
+                    buildLogs.value = emptyList()
+                    val timeFormat = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                    buildLogs.value = buildLogs.value + "[${timeFormat.format(java.util.Date())}] INFO: Triggering APK build for '${project?.name ?: ""}'"
+                    showBuildLogs = true
+
+                    val observedSteps = mutableListOf<String>()
+                    apkProgressSteps = "Copying template..."
+                    coroutineScope.launch {
+                        val result = ApkBuilder.buildApk(
+                            project = project,
+                            context = context,
+                            onProgress = { step ->
+                                if (!observedSteps.contains(step)) {
+                                    observedSteps.add(step)
+                                }
+                                apkProgressSteps = observedSteps.joinToString(" ")
+                            },
+                            onLog = { logLine ->
+                                buildLogs.value = buildLogs.value + logLine
+                            }
+                        )
+                        isBuildingApk = false
+                        result.onSuccess { signedFile ->
+                            builtApkFile = signedFile
+                            apkProgressSteps =
+                                "Copying template... Injecting config... Aligning... Signing... Verifying... Done"
+                            Toast.makeText(
+                                context,
+                                "Saved APK: Downloads/AiAppStudio/${signedFile.name}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }.onFailure { err ->
+                            apkErrorMessage = err.message
+                                ?: "Base APK template missing. Place real signed base.apk in assets."
+                        }
+                    }
+                }
+            },
+            buildOptions = project.buildOptions,
+            onConfigureOptions = {
+                showApiKeyValidationDialog = false
+                onConfigureBuild(project.id)
             }
         )
     }
@@ -402,6 +484,12 @@ fun ProjectDetailsScreen(
                             project = project,
                             iconState = appIconState,
                             onGenerateIcon = onGenerateAppIcon,
+                            onGenerateCustomIcon = onGenerateCustomAppIcon?.let { callback ->
+                                { prompt, style -> callback(project, prompt, style) }
+                            },
+                            onOpenIconStudio = onOpenIconStudio?.let { opener ->
+                                { opener(project.id) }
+                            },
                             accentColor = MaterialTheme.colorScheme.primary
                         )
 
@@ -861,36 +949,150 @@ fun ProjectDetailsScreen(
                             modifier = Modifier.testTag("apk_template_info_text")
                         )
 
+                        // Build Options Profile Card & Configure Button
+                        val currentBuildOptions = project?.buildOptions ?: BuildOptions()
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                            ),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("build_options_summary_card")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Tune,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "Build Settings & Profile",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    TextButton(
+                                        onClick = { if (project != null) onConfigureBuild(project.id) },
+                                        modifier = Modifier.testTag("configure_build_options_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Tune,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Configure")
+                                    }
+                                }
+
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = when (currentBuildOptions.buildVariant.lowercase()) {
+                                            "release" -> MaterialTheme.colorScheme.primaryContainer
+                                            "benchmark" -> MaterialTheme.colorScheme.tertiaryContainer
+                                            else -> MaterialTheme.colorScheme.secondaryContainer
+                                        }
+                                    ) {
+                                        Text(
+                                            text = "Variant: ${currentBuildOptions.buildVariant.uppercase()}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (currentBuildOptions.minifyEnabled) Color(0xFF14532D) else MaterialTheme.colorScheme.surfaceVariant
+                                    ) {
+                                        Text(
+                                            text = if (currentBuildOptions.minifyEnabled) "Minify: ON" else "Minify: OFF",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (currentBuildOptions.minifyEnabled) Color(0xFF86EFAC) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (currentBuildOptions.crunchPngs) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                                    ) {
+                                        Text(
+                                            text = if (currentBuildOptions.crunchPngs) "Crunch PNGs: ON" else "Crunch PNGs: OFF",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (currentBuildOptions.crunchPngs) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (currentBuildOptions.includeDebuggable) Color(0xFF1E3A8A) else MaterialTheme.colorScheme.surfaceVariant
+                                    ) {
+                                        Text(
+                                            text = if (currentBuildOptions.includeDebuggable) "Debuggable: ON" else "Debuggable: OFF",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (currentBuildOptions.includeDebuggable) Color(0xFF93C5FD) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.surfaceVariant
+                                    ) {
+                                        Text(
+                                            text = "API ${currentBuildOptions.targetSdk}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (currentBuildOptions.bundledTfliteModels.isNotEmpty()) {
+                                            MaterialTheme.colorScheme.tertiaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.surfaceVariant
+                                        }
+                                    ) {
+                                        Text(
+                                            text = if (currentBuildOptions.bundledTfliteModels.isNotEmpty()) {
+                                                "TFLite: ${currentBuildOptions.bundledTfliteModels.size} bundled"
+                                            } else {
+                                                "TFLite: None"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (currentBuildOptions.bundledTfliteModels.isNotEmpty()) {
+                                                MaterialTheme.colorScheme.onTertiaryContainer
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
                         Button(
                             onClick = {
                                 if (!isBuildingApk) {
-                                    isBuildingApk = true
-                                    apkErrorMessage = null
-                                    builtApkFile = null
-                                    val observedSteps = mutableListOf<String>()
-                                    apkProgressSteps = "Copying template..."
-                                    coroutineScope.launch {
-                                        val result = ApkBuilder.buildApk(project, context) { step ->
-                                            if (!observedSteps.contains(step)) {
-                                                observedSteps.add(step)
-                                            }
-                                            apkProgressSteps = observedSteps.joinToString(" ")
-                                        }
-                                        isBuildingApk = false
-                                        result.onSuccess { signedFile ->
-                                            builtApkFile = signedFile
-                                            apkProgressSteps =
-                                                "Copying template... Injecting config... Aligning... Signing... Verifying... Done"
-                                            Toast.makeText(
-                                                context,
-                                                "Saved APK: Downloads/AiAppStudio/${signedFile.name}",
-                                                Toast.LENGTH_LONG
-                                            ).show()
-                                        }.onFailure { err ->
-                                            apkErrorMessage = err.message
-                                                ?: "Base APK template missing. Place real signed base.apk in assets."
-                                        }
-                                    }
+                                    showApiKeyValidationDialog = true
                                 }
                             },
                             enabled = !isBuildingApk && !isSavingZip && !isSavingTxt,
@@ -918,26 +1120,269 @@ fun ProjectDetailsScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Build APK (Real)")
+                                Text("Build APK (${currentBuildOptions.buildVariant.replaceFirstChar { it.uppercase() }})")
                             }
                         }
 
-                        apkProgressSteps?.let { progressMsg ->
+                        // Real-Time Build Processing & Loading Line Banner
+                        if (isBuildingApk || apkProgressSteps != null) {
+                            val progressFraction = remember(apkProgressSteps) {
+                                val msg = apkProgressSteps.orEmpty()
+                                when {
+                                    msg.contains("Done") || msg.contains("Verifying") -> 0.95f
+                                    msg.contains("Signing") -> 0.75f
+                                    msg.contains("Aligning") -> 0.55f
+                                    msg.contains("Injecting") -> 0.35f
+                                    msg.contains("Copying") -> 0.15f
+                                    else -> if (isBuildingApk) 0.05f else 0.0f
+                                }
+                            }
+                            val animatedProgress by animateFloatAsState(
+                                targetValue = progressFraction,
+                                label = "RealtimeApkProgress"
+                            )
+                            val percentInt = (animatedProgress * 100).toInt()
+                            val latestLog = buildLogs.value.lastOrNull() ?: "Initializing offline build pipeline..."
+
                             Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-                                shape = MaterialTheme.shapes.small,
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                                shape = MaterialTheme.shapes.medium,
+                                border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .testTag("apk_build_progress_text")
+                                    .testTag("apk_build_realtime_loading_card")
                             ) {
-                                Text(
-                                    text = progressMsg,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.Medium,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.padding(12.dp)
-                                )
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            if (isBuildingApk) {
+                                                CircularProgressIndicator(
+                                                    strokeWidth = 2.dp,
+                                                    modifier = Modifier.size(16.dp),
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            } else {
+                                                Icon(
+                                                    imageVector = Icons.Default.CheckCircle,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                            Text(
+                                                text = if (isBuildingApk) "Real-Time Build Processing..." else "Build Completed Successfully",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Text(
+                                            text = "$percentInt%",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+
+                                    // Real-time animated loading line
+                                    LinearProgressIndicator(
+                                        progress = { animatedProgress },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(8.dp)
+                                            .clip(CircleShape),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+
+                                    // Step progress info
+                                    apkProgressSteps?.let { stepText ->
+                                        Text(
+                                            text = "Phase: $stepText",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontWeight = FontWeight.Medium,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+
+                                    // Live console streaming log ticker
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+                                        shape = MaterialTheme.shapes.small,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Terminal,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                            Text(
+                                                text = latestLog,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("apk_build_live_log_ticker")
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Expandable Build Logs Panel
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                            ),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                            shape = MaterialTheme.shapes.medium,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("build_logs_card")
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { showBuildLogs = !showBuildLogs },
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Terminal,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Text(
+                                            text = "Build Logs & Console Output (${buildLogs.value.size})",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = if (showBuildLogs) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                        contentDescription = if (showBuildLogs) "Collapse" else "Expand",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+
+                                if (showBuildLogs) {
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+
+                                    if (buildLogs.value.isEmpty()) {
+                                        Text(
+                                            text = "No build logs yet. Trigger a build to view real-time console output.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.secondary,
+                                            modifier = Modifier.padding(vertical = 8.dp)
+                                        )
+                                    } else {
+                                        val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+                                        val scrollState = rememberScrollState()
+
+                                        LaunchedEffect(buildLogs.value.size) {
+                                            coroutineScope.launch {
+                                                scrollState.animateScrollTo(scrollState.maxValue)
+                                            }
+                                        }
+
+                                        Surface(
+                                            color = Color(0xFF0F172A),
+                                            shape = MaterialTheme.shapes.small,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(200.dp)
+                                                .verticalScroll(scrollState)
+                                                .padding(8.dp)
+                                        ) {
+                                            Column(
+                                                modifier = Modifier.padding(8.dp),
+                                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                for (line in buildLogs.value) {
+                                                    val lineColor = when {
+                                                        line.contains("SUCCESS") -> Color(0xFF4ADE80)
+                                                        line.contains("ERROR") -> Color(0xFFF87171)
+                                                        line.contains("INFO") -> Color(0xFF60A5FA)
+                                                        else -> Color(0xFFE2E8F0)
+                                                    }
+                                                    Text(
+                                                        text = line,
+                                                        style = MaterialTheme.typography.bodySmall.copy(
+                                                            fontFamily = JetBrainsMonoFontFamily,
+                                                            fontSize = 11.sp
+                                                        ),
+                                                        color = lineColor
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.End,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            TextButton(
+                                                onClick = { buildLogs.value = emptyList() },
+                                                modifier = Modifier.testTag("clear_logs_button")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.DeleteSweep,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("Clear")
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            TextButton(
+                                                onClick = {
+                                                    clipboardManager.setText(AnnotatedString(buildLogs.value.joinToString("\n")))
+                                                    Toast.makeText(context, "Build logs copied to clipboard", Toast.LENGTH_SHORT).show()
+                                                },
+                                                modifier = Modifier.testTag("copy_logs_button")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.ContentCopy,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("Copy Logs")
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 

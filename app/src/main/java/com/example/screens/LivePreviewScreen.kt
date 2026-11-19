@@ -778,7 +778,9 @@ private fun ChatBubblesLayoutPreview(
             Button(
                 onClick = {
                     if (draft.isNotBlank()) {
-                        messages = messages + (true to draft)
+                        val userText = draft.trim()
+                        val assistantReply = "Received: \"$userText\". In ${project.name}, on-device inference processes your prompt locally."
+                        messages = messages + (true to userText) + (false to assistantReply)
                         draft = ""
                     }
                 },

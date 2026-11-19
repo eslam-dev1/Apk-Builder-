@@ -20,9 +20,12 @@ object CloudAiConfig {
     private const val PREFS_NAME = "cloud_ai_prefs"
     private const val KEY_PROVIDER = "cloud_ai_provider"
     private const val KEY_OPENROUTER_MODEL = "openrouter_model"
+    private const val KEY_GEMINI_API_KEY = "gemini_api_key"
     private const val KEY_OPENROUTER_API_KEY = "openrouter_api_key"
     private const val KEY_OFFLINE_MODE = "offline_mode_enabled"
     private const val KEY_BUILD_MODE_STRATEGY = "build_mode_strategy"
+    private const val KEY_DARK_MODE = "dark_mode_enabled"
+    private const val KEY_DYNAMIC_COLOR = "dynamic_color_enabled"
 
     const val DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
@@ -39,6 +42,9 @@ object CloudAiConfig {
     private val _openRouterModel = MutableStateFlow(DEFAULT_OPENROUTER_MODEL)
     val openRouterModel: StateFlow<String> = _openRouterModel.asStateFlow()
 
+    private val _savedGeminiApiKey = MutableStateFlow("")
+    val savedGeminiApiKey: StateFlow<String> = _savedGeminiApiKey.asStateFlow()
+
     private val _savedOpenRouterApiKey = MutableStateFlow("")
     val savedOpenRouterApiKey: StateFlow<String> = _savedOpenRouterApiKey.asStateFlow()
 
@@ -47,6 +53,12 @@ object CloudAiConfig {
 
     private val _isOfflineMode = MutableStateFlow(false)
     val isOfflineMode: StateFlow<Boolean> = _isOfflineMode.asStateFlow()
+
+    private val _isDarkMode = MutableStateFlow(true)
+    val isDarkMode: StateFlow<Boolean> = _isDarkMode.asStateFlow()
+
+    private val _isDynamicColor = MutableStateFlow(true)
+    val isDynamicColor: StateFlow<Boolean> = _isDynamicColor.asStateFlow()
 
     fun load(context: Context) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -57,6 +69,9 @@ object CloudAiConfig {
 
         val rawModel = prefs.getString(KEY_OPENROUTER_MODEL, DEFAULT_OPENROUTER_MODEL).orEmpty().trim()
         _openRouterModel.value = rawModel.ifBlank { DEFAULT_OPENROUTER_MODEL }
+
+        val rawGeminiKey = prefs.getString(KEY_GEMINI_API_KEY, "").orEmpty().trim()
+        _savedGeminiApiKey.value = rawGeminiKey
 
         val rawKey = prefs.getString(KEY_OPENROUTER_API_KEY, "").orEmpty().trim()
         _savedOpenRouterApiKey.value = rawKey
@@ -71,6 +86,25 @@ object CloudAiConfig {
         }
         _buildModeStrategy.value = resolvedStrategy
         _isOfflineMode.value = resolvedStrategy == BuildModeStrategy.OFFLINE
+
+        _isDarkMode.value = prefs.getBoolean(KEY_DARK_MODE, true)
+        _isDynamicColor.value = prefs.getBoolean(KEY_DYNAMIC_COLOR, true)
+    }
+
+    fun setDarkMode(context: Context, enabled: Boolean) {
+        _isDarkMode.value = enabled
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_DARK_MODE, enabled)
+            .apply()
+    }
+
+    fun setDynamicColor(context: Context, enabled: Boolean) {
+        _isDynamicColor.value = enabled
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_DYNAMIC_COLOR, enabled)
+            .apply()
     }
 
     fun setProvider(context: Context, provider: CloudAiProvider) {
@@ -107,6 +141,15 @@ object CloudAiConfig {
             .apply()
     }
 
+    fun setSavedGeminiApiKey(context: Context, apiKey: String) {
+        val cleaned = apiKey.trim()
+        _savedGeminiApiKey.value = cleaned
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_GEMINI_API_KEY, cleaned)
+            .apply()
+    }
+
     fun setSavedOpenRouterApiKey(context: Context, apiKey: String) {
         val cleaned = apiKey.trim()
         _savedOpenRouterApiKey.value = cleaned
@@ -120,12 +163,22 @@ object CloudAiConfig {
         setSavedOpenRouterApiKey(context, "")
     }
 
-    fun effectiveGeminiApiKey(): String {
+    fun secretsGeminiApiKey(): String {
         val key = BuildConfig.GEMINI_API_KEY.trim()
         return if (key.isEmpty() || key == "MY_GEMINI_API_KEY" || key == "null") "" else key
     }
 
+    fun effectiveGeminiApiKey(): String {
+        val userKey = _savedGeminiApiKey.value.trim()
+        if (userKey.isNotEmpty() && userKey != "MY_GEMINI_API_KEY" && userKey != "null") {
+            return userKey
+        }
+        return secretsGeminiApiKey()
+    }
+
     fun isGeminiKeyMissing(): Boolean = effectiveGeminiApiKey().isEmpty()
+
+    fun hasUserSavedGeminiKey(): Boolean = _savedGeminiApiKey.value.trim().isNotEmpty()
 
     fun secretsOpenRouterApiKey(): String {
         val key = BuildConfig.OPENROUTER_API_KEY.trim()
@@ -154,6 +207,7 @@ object CloudAiConfig {
     internal fun resetForTest() {
         _currentProvider.value = CloudAiProvider.GEMINI
         _openRouterModel.value = DEFAULT_OPENROUTER_MODEL
+        _savedGeminiApiKey.value = ""
         _savedOpenRouterApiKey.value = ""
         _buildModeStrategy.value = BuildModeStrategy.AUTO
         _isOfflineMode.value = false

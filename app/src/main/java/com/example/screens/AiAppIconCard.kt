@@ -34,7 +34,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
@@ -47,14 +49,18 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,6 +71,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.CodeExporter
@@ -84,11 +91,23 @@ fun AiAppIconGeneratorSection(
     iconState: AppIconUiState,
     onGenerateIcon: (AppProject) -> Unit,
     accentColor: Color = MaterialTheme.colorScheme.primary,
+    onGenerateCustomIcon: ((prompt: String, style: String) -> Unit)? = null,
+    onOpenIconStudio: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val effectiveStyle = project.designStyle.ifBlank { designFor(project).designStyle }
+    var inlinePrompt by rememberSaveable(project.id) { mutableStateOf("") }
+
+    val triggerGeneration: () -> Unit = {
+        val custom = inlinePrompt.trim()
+        if (custom.isNotEmpty() && onGenerateCustomIcon != null) {
+            onGenerateCustomIcon(custom, effectiveStyle)
+        } else {
+            onGenerateIcon(project)
+        }
+    }
 
     Card(
         shape = MaterialTheme.shapes.medium,
@@ -117,17 +136,44 @@ fun AiAppIconGeneratorSection(
                         color = accentColor
                     )
                     Text(
-                        text = "Tailored to \"${project.name}\" • $effectiveStyle Style",
+                        text = "Imagen Generator • Auto-adds to project res/drawable/",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+                if (onOpenIconStudio != null) {
+                    OutlinedButton(
+                        onClick = onOpenIconStudio,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("open_icon_studio_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                            contentDescription = "Open App Icon Generator",
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Studio", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
 
             when (iconState) {
                 is AppIconUiState.Idle -> {
+                    if (onGenerateCustomIcon != null) {
+                        OutlinedTextField(
+                            value = inlinePrompt,
+                            onValueChange = { inlinePrompt = it },
+                            label = { Text("Icon Prompt (Optional)") },
+                            placeholder = { Text("Describe symbol & lighting, or leave blank for auto") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ai_icon_custom_prompt_field")
+                        )
+                    }
                     Button(
-                        onClick = { onGenerateIcon(project) },
+                        onClick = triggerGeneration,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = accentColor,
                             contentColor = Color.White
@@ -144,7 +190,7 @@ fun AiAppIconGeneratorSection(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Generate AI App Icon ($effectiveStyle)",
+                            text = "Generate App Icon ($effectiveStyle)",
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -255,11 +301,31 @@ fun AiAppIconGeneratorSection(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                text = "${iconState.styleUsed} Adaptive Icon",
+                                text = "${iconState.styleUsed} • ${iconState.engineUsed}",
                                 style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+
+                            if (iconState.drawableResources.isNotEmpty()) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Added to Drawables",
+                                        tint = accentColor,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = "Added to ${iconState.drawableResources.first()}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = accentColor
+                                    )
+                                }
+                            }
 
                             FilledTonalButton(
                                 onClick = {
@@ -299,7 +365,7 @@ fun AiAppIconGeneratorSection(
                             }
 
                             FilledTonalButton(
-                                onClick = { onGenerateIcon(project) },
+                                onClick = triggerGeneration,
                                 contentPadding = PaddingValues(vertical = 8.dp, horizontal = 12.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -368,7 +434,7 @@ fun AiAppIconGeneratorSection(
     }
 }
 
-private suspend fun saveIconBitmapToDownloads(
+internal suspend fun saveIconBitmapToDownloads(
     context: Context,
     projectName: String,
     bitmap: Bitmap

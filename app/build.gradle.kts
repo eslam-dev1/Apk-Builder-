@@ -60,6 +60,11 @@ android {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
   }
+  kotlin {
+    compilerOptions {
+      freeCompilerArgs.add("-Xskip-metadata-version-check")
+    }
+  }
   buildFeatures {
     compose = true
     buildConfig = true
@@ -124,11 +129,16 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.kotlinx.serialization.json)
   implementation(libs.apksig)
+  implementation(libs.litert)
+  implementation(libs.litert.gpu)
+  implementation(libs.litertlm.android)
+  implementation(libs.mlkit.text.recognition)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   // implementation(libs.retrofit)
+  testImplementation(platform(libs.androidx.compose.bom))
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -140,6 +150,7 @@ dependencies {
   androidTestImplementation(libs.androidx.espresso.core)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.runner)
+  debugImplementation(platform(libs.androidx.compose.bom))
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   // "ksp"(libs.androidx.room.compiler)

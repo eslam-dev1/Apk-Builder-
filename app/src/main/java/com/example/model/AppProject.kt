@@ -14,7 +14,10 @@ data class AppProject(
     val screens: List<String> = emptyList(),
     val designStyle: String = "",
     val primaryColorHex: String = "",
-    val screenSpecs: List<ScreenSpec> = emptyList()
+    val screenSpecs: List<ScreenSpec> = emptyList(),
+    val buildOptions: BuildOptions = BuildOptions(),
+    val iconDrawableName: String = "",
+    val iconBackgroundHex: String = ""
 ) {
     fun toJsonObject(): JSONObject {
         return JSONObject().apply {
@@ -28,6 +31,9 @@ data class AppProject(
             put("designStyle", designStyle)
             put("primaryColorHex", primaryColorHex)
             put("screenSpecs", JSONArray().apply { screenSpecs.forEach { put(it.toJsonObject()) } })
+            put("buildOptions", buildOptions.toJsonObject())
+            if (iconDrawableName.isNotBlank()) put("iconDrawableName", iconDrawableName)
+            if (iconBackgroundHex.isNotBlank()) put("iconBackgroundHex", iconBackgroundHex)
         }
     }
 
@@ -69,7 +75,78 @@ data class AppProject(
                 screens = screensList,
                 designStyle = json.optString("designStyle", ""),
                 primaryColorHex = json.optString("primaryColorHex", ""),
-                screenSpecs = parseScreenSpecs(json.optJSONArray("screenSpecs"))
+                screenSpecs = parseScreenSpecs(json.optJSONArray("screenSpecs")),
+                buildOptions = BuildOptions.fromJsonObject(json.optJSONObject("buildOptions")),
+                iconDrawableName = json.optString("iconDrawableName", ""),
+                iconBackgroundHex = json.optString("iconBackgroundHex", "")
+            )
+        }
+    }
+}
+
+enum class BuildVariant(val id: String, val displayName: String, val description: String) {
+    DEBUG("debug", "Debug", "Includes debuggable flags, symbols & faster compilation"),
+    RELEASE("release", "Release", "Optimized production build with code minification"),
+    BENCHMARK("benchmark", "Benchmark", "Profileable build for performance & macrobenchmark analysis");
+
+    companion object {
+        fun fromId(id: String): BuildVariant = entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: DEBUG
+    }
+}
+
+data class BuildOptions(
+    val buildVariant: String = "debug",
+    val minifyEnabled: Boolean = false,
+    val crunchPngs: Boolean = false,
+    val includeDebuggable: Boolean = true,
+    val shrinkResources: Boolean = false,
+    val optimizeBytecode: Boolean = false,
+    val targetSdk: Int = 36,
+    val versionName: String = "1.0",
+    val versionCode: Int = 1,
+    val signingScheme: String = "v1+v2",
+    val bundledTfliteModels: List<String> = emptyList()
+) {
+    fun toJsonObject(): JSONObject = JSONObject().apply {
+        put("buildVariant", buildVariant)
+        put("minifyEnabled", minifyEnabled)
+        put("crunchPngs", crunchPngs)
+        put("includeDebuggable", includeDebuggable)
+        put("shrinkResources", shrinkResources)
+        put("optimizeBytecode", optimizeBytecode)
+        put("targetSdk", targetSdk)
+        put("versionName", versionName)
+        put("versionCode", versionCode)
+        put("signingScheme", signingScheme)
+        put("bundledTfliteModels", JSONArray(bundledTfliteModels))
+    }
+
+    val variant: BuildVariant
+        get() = BuildVariant.fromId(buildVariant)
+
+    companion object {
+        fun fromJsonObject(json: JSONObject?): BuildOptions {
+            if (json == null) return BuildOptions()
+            val modelsArray = json.optJSONArray("bundledTfliteModels")
+            val modelsList = if (modelsArray != null) {
+                (0 until modelsArray.length()).mapNotNull {
+                    modelsArray.optString(it).takeIf { name -> name.isNotBlank() }
+                }.distinct()
+            } else {
+                emptyList()
+            }
+            return BuildOptions(
+                buildVariant = json.optString("buildVariant", "debug"),
+                minifyEnabled = json.optBoolean("minifyEnabled", false),
+                crunchPngs = json.optBoolean("crunchPngs", false),
+                includeDebuggable = json.optBoolean("includeDebuggable", true),
+                shrinkResources = json.optBoolean("shrinkResources", false),
+                optimizeBytecode = json.optBoolean("optimizeBytecode", false),
+                targetSdk = json.optInt("targetSdk", 36),
+                versionName = json.optString("versionName", "1.0"),
+                versionCode = json.optInt("versionCode", 1),
+                signingScheme = json.optString("signingScheme", "v1+v2"),
+                bundledTfliteModels = modelsList
             )
         }
     }
@@ -128,7 +205,15 @@ data class AiFeatureIdea(
 sealed interface AppIconUiState {
     data object Idle : AppIconUiState
     data object Loading : AppIconUiState
-    data class Success(val bitmap: Bitmap, val styleUsed: String) : AppIconUiState
+    data class Success(
+        val bitmap: Bitmap,
+        val styleUsed: String,
+        val engineUsed: String = "Imagen",
+        val promptUsed: String = "",
+        val drawableResources: List<String> = emptyList(),
+        val backgroundHex: String = "",
+        val drawableDirPath: String = ""
+    ) : AppIconUiState
     data class Error(val message: String) : AppIconUiState
 }
 

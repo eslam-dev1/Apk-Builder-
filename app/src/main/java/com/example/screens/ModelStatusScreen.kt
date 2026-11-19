@@ -88,10 +88,15 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ai.DownloadStatus
 import com.example.ai.GlobalDownloadProgress
+import com.example.ai.LiteRtRuntimeManager
+import com.example.ai.LocalAiCapabilitiesList
+import com.example.ai.LocalAiCategory
+import com.example.ai.LocalLlmEngine
 import com.example.ai.ModelDownloadProgress
 import com.example.ai.ModelManager
 import com.example.ai.PreflightCheckResult
 import com.example.ai.QueuedDownloadItem
+import com.example.ai.TfliteModelManager
 import com.example.data.ai.LocalModel
 import com.example.data.ai.ModelCatalog
 import java.util.Locale
@@ -106,6 +111,8 @@ enum class OfflineModelStateLabel(val label: String) {
 @Composable
 fun ModelStatusScreen(
     onBack: () -> Unit,
+    onOpenCreate: (() -> Unit)? = null,
+    onOpenLocalAiManager: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBack)
@@ -119,6 +126,16 @@ fun ModelStatusScreen(
     val globalProgress by ModelManager.globalProgress.collectAsStateWithLifecycle()
     val installedFiles by ModelManager.installedFiles.collectAsStateWithLifecycle()
     val selectedModelFile by ModelManager.selectedModelFile.collectAsStateWithLifecycle()
+    val localLlmState by LocalLlmEngine.state.collectAsStateWithLifecycle()
+    val localTfliteModels by TfliteModelManager.localModels.collectAsStateWithLifecycle()
+    val tfliteDownloadState by TfliteModelManager.downloadState.collectAsStateWithLifecycle()
+    val tfliteBenchmarks by LiteRtRuntimeManager.benchmarks.collectAsStateWithLifecycle()
+    val testingTfliteFile by LiteRtRuntimeManager.testingFile.collectAsStateWithLifecycle()
+
+    var selectedFilterTab by remember { mutableStateOf(LocalAiFilterTab.ALL) }
+    var showLlmTesterDialog by remember { mutableStateOf(false) }
+    var tfliteStatusMessage by remember { mutableStateOf<String?>(null) }
+    var isTfliteStatusError by remember { mutableStateOf(false) }
 
     var availableBytes by remember { mutableLongStateOf(0L) }
     var totalBytes by remember { mutableLongStateOf(0L) }
@@ -149,6 +166,7 @@ fun ModelStatusScreen(
 
     fun refreshStorageMetrics() {
         ModelManager.refreshState(context)
+        TfliteModelManager.refreshModels(context)
         val dir = ModelCatalog.modelsDir(context)
         runCatching {
             val stat = StatFs(dir.absolutePath)
@@ -309,6 +327,45 @@ fun ModelStatusScreen(
         )
     }
 
+    val verifiedTfliteCount = remember(localTfliteModels, tfliteBenchmarks) {
+        localTfliteModels.count { tfliteBenchmarks[it.fileName]?.isVerified == true }
+    }
+
+    val allCapabilities = remember(
+        installedFiles,
+        selectedModelFile,
+        localLlmState,
+        localTfliteModels.size,
+        verifiedTfliteCount
+    ) {
+        LocalAiCapabilitiesList.buildCapabilityList(
+            context = context,
+            installedLlmFiles = installedFiles,
+            selectedLlmFile = selectedModelFile,
+            llmState = localLlmState,
+            tfliteModelsCount = localTfliteModels.size,
+            verifiedTfliteCount = verifiedTfliteCount
+        )
+    }
+
+    val filteredCapabilities = remember(allCapabilities, selectedFilterTab) {
+        when (selectedFilterTab) {
+            LocalAiFilterTab.ALL -> allCapabilities
+            LocalAiFilterTab.DEVICE_TOOLS -> allCapabilities.filter { it.category == LocalAiCategory.DEVICE_TOOLS }
+            LocalAiFilterTab.ON_DEVICE_LLMS -> allCapabilities.filter { it.category == LocalAiCategory.LLM_ENGINE }
+            LocalAiFilterTab.TFLITE_MODELS -> allCapabilities.filter { it.category == LocalAiCategory.TFLITE_RUNTIME }
+        }
+    }
+
+    if (showLlmTesterDialog) {
+        LocalLlmQuickPromptDialog(
+            installedFiles = installedFiles,
+            selectedModelFile = selectedModelFile,
+            llmState = localLlmState,
+            onDismiss = { showLlmTesterDialog = false }
+        )
+    }
+
     Box(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter
@@ -339,13 +396,13 @@ fun ModelStatusScreen(
                     )
                     Column {
                         Text(
-                            text = "Offline Model Status",
+                            text = "Local AI Hub & Models",
                             style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.testTag("model_status_title")
                         )
                         Text(
-                            text = "Gemma 4 & Qwen 3 Local AI Runtime",
+                            text = "On-device LLMs, TFLite runtime, OCR, voice & RAG tools",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -409,7 +466,31 @@ fun ModelStatusScreen(
                 }
             }
 
-            // Scrollable Content: Storage + Priority Queue List + Full Catalog List
+            // Filter Chips to arrange Local AI capabilities and models cleanly
+            LocalAiFilterChipRow(
+                selectedTab = selectedFilterTab,
+                onSelectTab = { selectedFilterTab = it }
+            )
+
+            if (onOpenLocalAiManager != null) {
+                FilledTonalButton(
+                    onClick = onOpenLocalAiManager,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("model_status_open_local_ai_manager_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Memory,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Open Local AI Manager (.tflite Build Bundling)")
+                }
+            }
+
+            // Scrollable Arranged List: Storage + Capabilities + Priority Queue + LLM Catalog + TFLite Catalog
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -455,77 +536,168 @@ fun ModelStatusScreen(
                     }
                 }
 
-                item(key = "catalog_header") {
-                    Text(
-                        text = "Available Offline Models",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
+                // Section 1: Arranged Local AI Engines & Tools List
+                if (filteredCapabilities.isNotEmpty()) {
+                    item(key = "local_ai_capabilities_header") {
+                        Text(
+                            text = "Local AI Engines & Tools (${filteredCapabilities.size})",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .testTag("local_ai_capabilities_header")
+                        )
+                    }
+
+                    items(filteredCapabilities, key = { it.id }) { capability ->
+                        LocalAiCapabilityListCard(
+                            capability = capability,
+                            llmState = localLlmState,
+                            hasInstalledLlm = installedFiles.isNotEmpty(),
+                            onOpenLlmTester = { showLlmTesterDialog = true },
+                            onUnloadLlm = {
+                                coroutineScope.launch { LocalLlmEngine.unload() }
+                            },
+                            onViewTfliteTab = { selectedFilterTab = LocalAiFilterTab.TFLITE_MODELS },
+                            onViewLlmTab = { selectedFilterTab = LocalAiFilterTab.ON_DEVICE_LLMS },
+                            onOpenCreate = onOpenCreate
+                        )
+                    }
                 }
 
-                items(allModels, key = { it.id }) { model ->
-                    val isInstalled = model.fileName in installedFiles
-                    val isSelectedReady = isInstalled && (selectedModelFile == model.fileName)
-                    val partialBytes = remember(downloadProgress, installedFiles, downloadQueue) {
-                        ModelManager.hasPartialDownload(context, model.fileName)
+                // Section 2: On-Device .litertlm Catalog
+                if (selectedFilterTab == LocalAiFilterTab.ALL || selectedFilterTab == LocalAiFilterTab.ON_DEVICE_LLMS) {
+                    item(key = "catalog_header") {
+                        Text(
+                            text = "On-Device LLM Models (.litertlm) (${allModels.size})",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .testTag("llm_catalog_header")
+                        )
                     }
-                    val activeModelProgress = downloadProgress.takeIf {
-                        it.modelId == model.id && it.status != DownloadStatus.IDLE
-                    }
-                    val queueEntry = downloadQueue.find { it.model.id == model.id }
 
-                    val currentStateLabel = resolveModelStateLabel(
-                        isInstalled = isInstalled,
-                        isSelectedReady = isSelectedReady,
-                        partialBytes = partialBytes,
-                        progress = activeModelProgress
-                    )
-
-                    val onDiskBytes = remember(installedFiles, partialBytes, activeModelProgress?.bytesDownloaded) {
-                        val finalFile = ModelCatalog.modelFile(context, model.fileName)
-                        when {
-                            finalFile.exists() -> finalFile.length()
-                            activeModelProgress != null && activeModelProgress.bytesDownloaded > 0L ->
-                                activeModelProgress.bytesDownloaded
-                            else -> partialBytes
+                    items(allModels, key = { it.id }) { model ->
+                        val isInstalled = model.fileName in installedFiles
+                        val isSelectedReady = isInstalled && (selectedModelFile == model.fileName)
+                        val partialBytes = remember(downloadProgress, installedFiles, downloadQueue) {
+                            ModelManager.hasPartialDownload(context, model.fileName)
                         }
-                    }
+                        val activeModelProgress = downloadProgress.takeIf {
+                            it.modelId == model.id && it.status != DownloadStatus.IDLE
+                        }
+                        val queueEntry = downloadQueue.find { it.model.id == model.id }
 
-                    ModelStatusListItemCard(
-                        model = model,
-                        stateLabel = currentStateLabel,
-                        isInstalled = isInstalled,
-                        isSelectedReady = isSelectedReady,
-                        queueEntry = queueEntry,
-                        hasOtherActiveOrQueued = downloadQueue.isNotEmpty() && queueEntry == null,
-                        onDiskBytes = onDiskBytes,
-                        progress = activeModelProgress,
-                        onDownloadOrQueue = {
-                            statusBannerMessage = null
-                            coroutineScope.launch {
-                                val check = ModelManager.preflightCheck(context, model)
-                                if (check.errorMessage != null) {
-                                    statusBannerMessage = check.errorMessage
-                                } else {
-                                    pendingPreflight = check
-                                }
+                        val currentStateLabel = resolveModelStateLabel(
+                            isInstalled = isInstalled,
+                            isSelectedReady = isSelectedReady,
+                            partialBytes = partialBytes,
+                            progress = activeModelProgress
+                        )
+
+                        val onDiskBytes = remember(installedFiles, partialBytes, activeModelProgress?.bytesDownloaded) {
+                            val finalFile = ModelCatalog.modelFile(context, model.fileName)
+                            when {
+                                finalFile.exists() -> finalFile.length()
+                                activeModelProgress != null && activeModelProgress.bytesDownloaded > 0L ->
+                                    activeModelProgress.bytesDownloaded
+                                else -> partialBytes
                             }
-                        },
-                        onPause = { ModelManager.pauseDownload() },
-                        onCancel = {
-                            ModelManager.cancelDownload(context, model)
-                            refreshStorageMetrics()
-                        },
-                        onDelete = {
-                            ModelManager.deleteModel(context, model)
-                            refreshStorageMetrics()
-                        },
-                        onSelectReady = {
-                            ModelManager.selectModel(context, model.id, model.fileName)
                         }
-                    )
+
+                        ModelStatusListItemCard(
+                            model = model,
+                            stateLabel = currentStateLabel,
+                            isInstalled = isInstalled,
+                            isSelectedReady = isSelectedReady,
+                            queueEntry = queueEntry,
+                            hasOtherActiveOrQueued = downloadQueue.isNotEmpty() && queueEntry == null,
+                            onDiskBytes = onDiskBytes,
+                            progress = activeModelProgress,
+                            onDownloadOrQueue = {
+                                statusBannerMessage = null
+                                coroutineScope.launch {
+                                    val check = ModelManager.preflightCheck(context, model)
+                                    if (check.errorMessage != null) {
+                                        statusBannerMessage = check.errorMessage
+                                    } else {
+                                        pendingPreflight = check
+                                    }
+                                }
+                            },
+                            onPause = { ModelManager.pauseDownload() },
+                            onCancel = {
+                                ModelManager.cancelDownload(context, model)
+                                refreshStorageMetrics()
+                            },
+                            onDelete = {
+                                ModelManager.deleteModel(context, model)
+                                refreshStorageMetrics()
+                            },
+                            onSelectReady = {
+                                ModelManager.selectModel(context, model.id, model.fileName)
+                            }
+                        )
+                    }
+                }
+
+                // Section 3: Local .tflite Models List
+                if (selectedFilterTab == LocalAiFilterTab.ALL || selectedFilterTab == LocalAiFilterTab.TFLITE_MODELS) {
+                    item(key = "tflite_hub_header") {
+                        Text(
+                            text = "Local TFLite Models (.tflite) (${localTfliteModels.size})",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .testTag("tflite_catalog_header")
+                        )
+                    }
+
+                    item(key = "tflite_hub_toolbar") {
+                        TfliteHubToolbarCard(
+                            localModelsCount = localTfliteModels.size,
+                            downloadState = tfliteDownloadState,
+                            statusMessage = tfliteStatusMessage,
+                            isStatusError = isTfliteStatusError,
+                            onStatusUpdate = { msg, err ->
+                                tfliteStatusMessage = msg
+                                isTfliteStatusError = err
+                            }
+                        )
+                    }
+
+                    items(localTfliteModels, key = { "hub_${it.id}" }) { tfliteModel ->
+                        HubTfliteModelListItemCard(
+                            model = tfliteModel,
+                            benchmark = tfliteBenchmarks[tfliteModel.fileName],
+                            isTesting = testingTfliteFile == tfliteModel.fileName,
+                            onBenchmark = {
+                                coroutineScope.launch {
+                                    val res = LiteRtRuntimeManager.inspectAndBenchmarkModel(
+                                        context = context,
+                                        fileName = tfliteModel.fileName
+                                    )
+                                    isTfliteStatusError = !res.isVerified
+                                    tfliteStatusMessage = if (res.isVerified) {
+                                        "${tfliteModel.fileName}: ${res.statusNote}"
+                                    } else {
+                                        "${tfliteModel.fileName}: ${res.errorMessage ?: res.statusNote}"
+                                    }
+                                }
+                            },
+                            onDelete = {
+                                TfliteModelManager.deleteModel(context, tfliteModel.fileName)
+                                LiteRtRuntimeManager.clearResult(tfliteModel.fileName)
+                                isTfliteStatusError = false
+                                tfliteStatusMessage = "Removed ${tfliteModel.fileName}"
+                            }
+                        )
+                    }
                 }
             }
         }

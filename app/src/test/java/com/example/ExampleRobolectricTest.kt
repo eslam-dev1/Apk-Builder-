@@ -10,13 +10,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.CodeExporter
@@ -26,6 +30,7 @@ import com.example.model.AppProject
 import java.io.ByteArrayInputStream
 import java.util.zip.ZipInputStream
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -603,7 +608,9 @@ class ExampleRobolectricTest {
 
         composeTestRule.setContent {
             com.example.ui.theme.MyApplicationTheme {
-                androidx.compose.foundation.layout.Column {
+                androidx.compose.foundation.layout.Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState())
+                ) {
                     com.example.screens.AiGenerationLoadingCard(
                         title = "Generating App with Gemini AI",
                         stages = listOf(
@@ -625,8 +632,8 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithText("Generating App with Gemini AI").assertIsDisplayed()
         composeTestRule.onNodeWithText("Analyzing your app idea...").assertIsDisplayed()
         composeTestRule.onNodeWithTag("create_indeterminate_progress_bar").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("ai_icon_loading_indicator").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("ai_icon_indeterminate_progress_bar").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("ai_icon_loading_indicator").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("ai_icon_indeterminate_progress_bar").performScrollTo().assertIsDisplayed()
 
         // Advancing past stage interval transitions to the next status text
         composeTestRule.mainClock.advanceTimeBy(2000L)
@@ -1332,5 +1339,891 @@ class ExampleRobolectricTest {
         composeTestRule.onAllNodesWithText("Quick Starter Ideas").assertCountEquals(0)
         composeTestRule.onNodeWithTag("quick_starter_ideas_row").assertDoesNotExist()
         composeTestRule.onNodeWithTag("create_open_gallery_button").assertDoesNotExist()
+    }
+
+    @Test
+    fun `buildOptions serializes and deserializes bundledTfliteModels cleanly`() {
+        val options = com.example.model.BuildOptions(
+            buildVariant = "release",
+            minifyEnabled = true,
+            includeDebuggable = false,
+            shrinkResources = true,
+            targetSdk = 35,
+            versionName = "2.1.0",
+            versionCode = 42,
+            bundledTfliteModels = listOf("mobilenet_v2.tflite", "yamnet.tflite")
+        )
+        val json = options.toJsonObject()
+        val parsed = com.example.model.BuildOptions.fromJsonObject(json)
+        assertEquals("release", parsed.buildVariant)
+        assertTrue(parsed.minifyEnabled)
+        assertEquals(false, parsed.includeDebuggable)
+        assertTrue(parsed.shrinkResources)
+        assertEquals(35, parsed.targetSdk)
+        assertEquals("2.1.0", parsed.versionName)
+        assertEquals(42, parsed.versionCode)
+        assertEquals(listOf("mobilenet_v2.tflite", "yamnet.tflite"), parsed.bundledTfliteModels)
+    }
+
+    @Test
+    fun `apkBuilder bundles selected tflite models uncompressed as STORED entries`() = kotlinx.coroutines.test.runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val tfliteDir = com.example.ai.TfliteModelManager.tfliteDir(context)
+        val modelFile = java.io.File(tfliteDir, "mobilenet_v2_test.tflite")
+        val samplePayload = byteArrayOf(
+            0x1C, 0x00, 0x00, 0x00,
+            'T'.code.toByte(), 'F'.code.toByte(), 'L'.code.toByte(), '3'.code.toByte(),
+            0x01, 0x02, 0x03, 0x04
+        )
+        modelFile.writeBytes(samplePayload)
+
+        try {
+            val project = AppProject(
+                id = "p_tflite",
+                name = "OfflineVisionApp",
+                description = "Offline vision classifier",
+                prompt = "Classify images offline",
+                createdAt = 2000L,
+                buildOptions = com.example.model.BuildOptions(
+                    buildVariant = "release",
+                    bundledTfliteModels = listOf("mobilenet_v2_test.tflite")
+                )
+            )
+            val logs = mutableListOf<String>()
+            val result = com.example.apk.ApkBuilder.buildApk(
+                project = project,
+                context = context,
+                onLog = { logs.add(it) }
+            )
+            assertTrue("APK build with TFLite should succeed: ${result.exceptionOrNull()}", result.isSuccess)
+            val signedApk = result.getOrThrow()
+
+            val verifier = com.android.apksig.ApkVerifier.Builder(signedApk).build().verify()
+            assertTrue("Signed APK with TFLite model must pass ApkVerifier", verifier.isVerified)
+            assertTrue(logs.any { it.contains("assets/models/mobilenet_v2_test.tflite") })
+
+            java.util.zip.ZipFile(signedApk).use { zip ->
+                val modelEntry = zip.getEntry("assets/models/mobilenet_v2_test.tflite")
+                assertTrue("Bundled TFLite entry must exist in APK assets/models/", modelEntry != null)
+                assertEquals(
+                    "Bundled TFLite entry must be STORED (uncompressed) for mmap",
+                    java.util.zip.ZipEntry.STORED,
+                    modelEntry!!.method
+                )
+                assertEquals(samplePayload.size.toLong(), modelEntry.size)
+
+                val configEntry = zip.getEntry("assets/config.json")
+                val configText = zip.getInputStream(configEntry).bufferedReader().readText()
+                assertTrue(configText.contains("mobilenet_v2_test.tflite"))
+            }
+        } finally {
+            modelFile.delete()
+            com.example.ai.TfliteModelManager.refreshModels(context)
+        }
+    }
+
+    @Test
+    fun `tfliteModelSelectorCard displays local models and toggles selection`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val tfliteDir = com.example.ai.TfliteModelManager.tfliteDir(context)
+        val modelFile = java.io.File(tfliteDir, "ssd_mobilenet_v1.tflite")
+        modelFile.writeBytes(
+            byteArrayOf(0x1C, 0x00, 0x00, 0x00, 'T'.code.toByte(), 'F'.code.toByte(), 'L'.code.toByte(), '3'.code.toByte())
+        )
+        com.example.ai.TfliteModelManager.refreshModels(context)
+
+        var selectedModels = emptyList<String>()
+        try {
+            composeTestRule.setContent {
+                com.example.ui.theme.MyApplicationTheme {
+                    val state = androidx.compose.runtime.remember {
+                        androidx.compose.runtime.mutableStateOf(emptyList<String>())
+                    }
+                    com.example.screens.TfliteModelSelectorCard(
+                        selectedModelFileNames = state.value,
+                        onSelectionChange = { updated ->
+                            state.value = updated
+                            selectedModels = updated
+                        }
+                    )
+                }
+            }
+
+            composeTestRule.onNodeWithTag("tflite_model_selector_card").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("tflite_model_row_ssd_mobilenet_v1.tflite").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("tflite_checkbox_ssd_mobilenet_v1.tflite").performClick()
+            composeTestRule.waitForIdle()
+            assertEquals(listOf("ssd_mobilenet_v1.tflite"), selectedModels)
+        } finally {
+            modelFile.delete()
+            com.example.ai.TfliteModelManager.refreshModels(context)
+        }
+    }
+
+    @Test
+    fun `buildProjectZip includes LocalTfliteRunner when bundledTfliteModels is nonEmpty`() {
+        val project = AppProject(
+            id = "p_tflite_zip",
+            name = "VisionClassifier",
+            description = "Classify objects offline",
+            prompt = "Offline image classifier",
+            createdAt = 1000L,
+            features = listOf("On-device classification"),
+            screens = listOf("Home", "Scanner"),
+            buildOptions = com.example.model.BuildOptions(
+                bundledTfliteModels = listOf("mobilenet_v2.tflite")
+            )
+        )
+        val zipBytes = CodeExporter.buildProjectZip(project)
+        val entryNames = mutableListOf<String>()
+        ZipInputStream(ByteArrayInputStream(zipBytes)).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                entryNames.add(entry.name)
+                entry = zis.nextEntry
+            }
+        }
+        assertTrue(entryNames.contains("LocalTfliteRunner.kt"))
+        assertEquals(5, entryNames.size)
+    }
+
+    @Test
+    fun `createScreen shows local AI voice OCR controls and generates instant offline scaffold`() {
+        val viewModel = com.example.viewmodel.GenerateViewModel()
+
+        composeTestRule.setContent {
+            com.example.ui.theme.MyApplicationTheme {
+                com.example.screens.CreateScreen(
+                    viewModel = viewModel,
+                    onBack = {},
+                    onSaveToProjects = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("create_voice_dictate_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("create_ocr_image_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("generate_offline_scaffold_button").performScrollTo().assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("prompt_text_field").performScrollTo().performTextInput("Gym workout timer")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("generate_offline_scaffold_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        val generated = viewModel.generatedProject.value
+        org.junit.Assert.assertNotNull(generated)
+        assertEquals("PulseTrack Studio", generated!!.name)
+        composeTestRule.onNodeWithTag("generated_result_card").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun `modelStatusScreen arranges local AI capabilities tools and models with working filter chips`() {
+        composeTestRule.setContent {
+            com.example.ui.theme.MyApplicationTheme {
+                com.example.screens.ModelStatusScreen(
+                    onBack = {},
+                    onOpenCreate = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("local_ai_filter_row").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("local_ai_filter_all").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("local_ai_filter_tools").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("local_ai_filter_llms").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("local_ai_filter_tflite").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("model_status_lazy_column")
+            .performScrollToNode(hasTestTag("local_ai_capabilities_header"))
+        composeTestRule.onNodeWithTag("local_ai_capabilities_header").assertIsDisplayed()
+
+        // Filter to Device AI Tools -> shows 3 zero-download local AI tools and hides LLM/TFLite catalog headers
+        composeTestRule.onNodeWithTag("local_ai_filter_tools").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("model_status_lazy_column")
+            .performScrollToNode(hasTestTag("local_ai_capabilities_header"))
+        composeTestRule.onNodeWithText("Local AI Engines & Tools (3)").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("llm_catalog_header").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("tflite_catalog_header").assertDoesNotExist()
+
+        // Filter to TFLite Models -> displays TFLite catalog section
+        composeTestRule.onNodeWithTag("local_ai_filter_tflite").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("model_status_lazy_column")
+            .performScrollToNode(hasTestTag("local_ai_capabilities_header"))
+        composeTestRule.onNodeWithText("Local AI Engines & Tools (1)").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("model_status_lazy_column")
+            .performScrollToNode(hasTestTag("tflite_catalog_header"))
+        composeTestRule.onNodeWithTag("tflite_catalog_header").assertIsDisplayed()
+    }
+
+    @Test
+    fun `localAiManagerScreen displays model size purpose and toggles enable state for build`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val tfliteDir = com.example.ai.TfliteModelManager.tfliteDir(context)
+        val visionFile = java.io.File(tfliteDir, "mobilenet_v2_vision.tflite")
+        val audioFile = java.io.File(tfliteDir, "yamnet_audio.tflite")
+
+        fun buildTfl3Payload(sizeBytes: Int): ByteArray {
+            val bytes = ByteArray(sizeBytes)
+            bytes[0] = 0x1C
+            bytes[4] = 'T'.code.toByte()
+            bytes[5] = 'F'.code.toByte()
+            bytes[6] = 'L'.code.toByte()
+            bytes[7] = '3'.code.toByte()
+            return bytes
+        }
+
+        visionFile.writeBytes(buildTfl3Payload(2048))
+        audioFile.writeBytes(buildTfl3Payload(4096))
+        com.example.ai.TfliteModelManager.refreshModels(context)
+
+        try {
+            val baseProject = AppProject(
+                id = "proj_local_mgr",
+                name = "EdgeVisionApp",
+                description = "Offline AI app",
+                prompt = "Classify images and sounds offline",
+                createdAt = 1000L,
+                buildOptions = com.example.model.BuildOptions(
+                    bundledTfliteModels = listOf("mobilenet_v2_vision.tflite")
+                )
+            )
+            val projectState = androidx.compose.runtime.mutableStateOf(baseProject)
+
+            composeTestRule.setContent {
+                com.example.ui.theme.MyApplicationTheme {
+                    com.example.screens.LocalAiManagerScreen(
+                        project = projectState.value,
+                        availableProjects = listOf(projectState.value),
+                        onUpdateEnabledModels = { _, updated ->
+                            projectState.value = projectState.value.copy(
+                                buildOptions = projectState.value.buildOptions.copy(bundledTfliteModels = updated)
+                            )
+                        }
+                    )
+                }
+            }
+
+            composeTestRule.onNodeWithTag("local_ai_manager_title").assertIsDisplayed()
+            composeTestRule.onNodeWithText("Local AI Manager").assertIsDisplayed()
+            composeTestRule.onNodeWithText("Target build: EdgeVisionApp").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("manager_enabled_count_text").assertIsDisplayed()
+            composeTestRule.onNodeWithText("1 / 2 Enabled for Build").assertIsDisplayed()
+            composeTestRule.onNodeWithText("Bundled APK payload: 2 KB").assertIsDisplayed()
+
+            // Verify Vision model metadata (size + purpose)
+            composeTestRule.onNodeWithTag("local_ai_manager_list")
+                .performScrollToNode(hasTestTag("manager_purpose_mobilenet_v2_vision.tflite"))
+            composeTestRule.onNodeWithText(
+                "On-device image classification & visual feature extraction"
+            ).assertIsDisplayed()
+            composeTestRule.onNodeWithTag("local_ai_manager_list")
+                .performScrollToNode(hasTestTag("manager_size_mobilenet_v2_vision.tflite"))
+            composeTestRule.onNodeWithTag("manager_size_mobilenet_v2_vision.tflite").assertIsDisplayed()
+            composeTestRule.onNodeWithText("Size: 2 KB").assertIsDisplayed()
+
+            // Verify Audio model metadata and enable it for the build
+            composeTestRule.onNodeWithTag("local_ai_manager_list")
+                .performScrollToNode(hasTestTag("manager_size_yamnet_audio.tflite"))
+            composeTestRule.onNodeWithText("Size: 4 KB").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("local_ai_manager_list")
+                .performScrollToNode(hasTestTag("manager_toggle_yamnet_audio.tflite"))
+            composeTestRule.onNodeWithTag("manager_toggle_yamnet_audio.tflite").performClick()
+            composeTestRule.waitForIdle()
+
+            assertEquals(
+                setOf("mobilenet_v2_vision.tflite", "yamnet_audio.tflite"),
+                projectState.value.buildOptions.bundledTfliteModels.toSet()
+            )
+            composeTestRule.onNodeWithText("2 / 2 Enabled for Build").assertIsDisplayed()
+            composeTestRule.onNodeWithText("Bundled APK payload: 6 KB").assertIsDisplayed()
+
+            // Disable Vision model for the build
+            composeTestRule.onNodeWithTag("local_ai_manager_list")
+                .performScrollToNode(hasTestTag("manager_toggle_mobilenet_v2_vision.tflite"))
+            composeTestRule.onNodeWithTag("manager_toggle_mobilenet_v2_vision.tflite").performClick()
+            composeTestRule.waitForIdle()
+
+            assertEquals(
+                listOf("yamnet_audio.tflite"),
+                projectState.value.buildOptions.bundledTfliteModels
+            )
+            composeTestRule.onNodeWithText("1 / 2 Enabled for Build").assertIsDisplayed()
+            composeTestRule.onNodeWithText("Bundled APK payload: 4 KB").assertIsDisplayed()
+
+            // Filter by Audio category -> hides Vision model card
+            composeTestRule.onNodeWithTag("manager_filter_audio").performScrollTo().performClick()
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("local_ai_manager_list")
+                .performScrollToNode(hasTestTag("local_ai_model_card_yamnet_audio.tflite"))
+            composeTestRule.onNodeWithTag("local_ai_model_card_yamnet_audio.tflite").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("local_ai_model_card_mobilenet_v2_vision.tflite").assertDoesNotExist()
+        } finally {
+            visionFile.delete()
+            audioFile.delete()
+            com.example.ai.TfliteModelManager.refreshModels(context)
+        }
+    }
+
+    @Test
+    fun `localAiManagerScreen displays empty state and buildConfigurationScreen links to manager`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val tfliteDir = com.example.ai.TfliteModelManager.tfliteDir(context)
+        tfliteDir.listFiles()?.forEach { it.delete() }
+        com.example.ai.TfliteModelManager.refreshModels(context)
+
+        composeTestRule.setContent {
+            com.example.ui.theme.MyApplicationTheme {
+                com.example.screens.LocalAiManagerScreen()
+            }
+        }
+        composeTestRule.onNodeWithTag("local_ai_manager_empty_state").assertIsDisplayed()
+        composeTestRule.onNodeWithText("No TFLite Models Available Yet").assertIsDisplayed()
+    }
+
+    @Test
+    fun `buildConfigurationScreen shows Open Local AI Manager entry button`() {
+        var openedManager = false
+        val project = AppProject(
+            id = "proj_cfg_mgr",
+            name = "ConfigApp",
+            description = "Config app",
+            prompt = "Offline camera app",
+            createdAt = 1000L
+        )
+        composeTestRule.setContent {
+            com.example.ui.theme.MyApplicationTheme {
+                com.example.screens.BuildConfigurationScreen(
+                    project = project,
+                    onSaveOptions = {},
+                    onInitiateBuild = {},
+                    onBack = {},
+                    onOpenLocalAiManager = { openedManager = true }
+                )
+            }
+        }
+        composeTestRule.onNodeWithTag("open_local_ai_manager_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("open_local_ai_manager_button").performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(openedManager)
+    }
+
+    @Test
+    fun `buildConfigurationScreen displays Signing Summary validating existing jks against dotEnv`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val keystoreDir = com.example.apk.KeystoreValidator.keystoreDir(context)
+        val jksFile = java.io.File(keystoreDir, "my-upload-key.jks")
+        val dotEnvFile = java.io.File(keystoreDir, ".env")
+
+        val keyPair = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        val certDer = com.example.apk.ApkBuilder.generateSelfSignedX509Der(keyPair)
+        val cert = java.security.cert.CertificateFactory.getInstance("X.509")
+            .generateCertificate(java.io.ByteArrayInputStream(certDer)) as java.security.cert.X509Certificate
+
+        val ks = java.security.KeyStore.getInstance("JKS")
+        ks.load(null, null)
+        ks.setKeyEntry("upload", keyPair.private, "releaseKey123!".toCharArray(), arrayOf(cert))
+        jksFile.outputStream().use { out -> ks.store(out, "releaseStore123!".toCharArray()) }
+        dotEnvFile.writeText(
+            """
+            KEYSTORE_PATH="my-upload-key.jks"
+            STORE_PASSWORD="releaseStore123!"
+            KEY_ALIAS="upload"
+            KEY_PASSWORD="releaseKey123!"
+            """.trimIndent()
+        )
+
+        try {
+            val project = AppProject(
+                id = "proj_signing_ok",
+                name = "SignedReleaseApp",
+                description = "App with release signing",
+                prompt = "Finance vault",
+                createdAt = 1000L,
+                buildOptions = com.example.model.BuildOptions(buildVariant = "release")
+            )
+            composeTestRule.setContent {
+                com.example.ui.theme.MyApplicationTheme {
+                    com.example.screens.BuildConfigurationScreen(
+                        project = project,
+                        onSaveOptions = {},
+                        onInitiateBuild = {},
+                        onBack = {}
+                    )
+                }
+            }
+
+            composeTestRule.onNodeWithTag("signing_summary_card").performScrollTo().assertIsDisplayed()
+            composeTestRule.onNodeWithTag("signing_summary_title").assertIsDisplayed()
+            composeTestRule.onNodeWithText("Signing Summary").assertIsDisplayed()
+            composeTestRule.waitUntil(timeoutMillis = 5_000) {
+                composeTestRule.onAllNodesWithText("Keystore Validated Against .env")
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            composeTestRule.onNodeWithTag("signing_summary_headline").performScrollTo().assertIsDisplayed()
+            composeTestRule.onNodeWithText("Keystore Validated Against .env").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("signing_jks_item_my-upload-key.jks").performScrollTo().assertIsDisplayed()
+            composeTestRule.onNodeWithTag("signing_env_store_password_status").performScrollTo().assertIsDisplayed()
+        } finally {
+            jksFile.delete()
+            dotEnvFile.delete()
+        }
+    }
+
+    @Test
+    fun `signingSummaryCard displays error feedback when jks fails env password check`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val keystoreDir = com.example.apk.KeystoreValidator.keystoreDir(context)
+        val jksFile = java.io.File(keystoreDir, "bad-key.jks")
+        val dotEnvFile = java.io.File(keystoreDir, ".env")
+
+        val keyPair = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        val certDer = com.example.apk.ApkBuilder.generateSelfSignedX509Der(keyPair)
+        val cert = java.security.cert.CertificateFactory.getInstance("X.509")
+            .generateCertificate(java.io.ByteArrayInputStream(certDer)) as java.security.cert.X509Certificate
+
+        val ks = java.security.KeyStore.getInstance("JKS")
+        ks.load(null, null)
+        ks.setKeyEntry("upload", keyPair.private, "actualKeyPass".toCharArray(), arrayOf(cert))
+        jksFile.outputStream().use { out -> ks.store(out, "actualStorePass".toCharArray()) }
+        dotEnvFile.writeText(
+            """
+            KEYSTORE_PATH="bad-key.jks"
+            STORE_PASSWORD="wrongStorePassFromEnv"
+            KEY_ALIAS="upload"
+            KEY_PASSWORD="actualKeyPass"
+            """.trimIndent()
+        )
+
+        try {
+            composeTestRule.setContent {
+                com.example.ui.theme.MyApplicationTheme {
+                    androidx.compose.foundation.layout.Column(
+                        modifier = Modifier.verticalScroll(rememberScrollState())
+                    ) {
+                        com.example.screens.SigningSummaryCard(
+                            targetVariant = com.example.model.BuildVariant.RELEASE,
+                            signingScheme = "v1+v2"
+                        )
+                    }
+                }
+            }
+            composeTestRule.waitUntil(timeoutMillis = 5_000) {
+                composeTestRule.onAllNodesWithText("Keystore Validation Failed")
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            composeTestRule.onNodeWithText("Keystore Validation Failed").assertIsDisplayed()
+            composeTestRule.onNodeWithText("INVALID").assertIsDisplayed()
+            composeTestRule.onNodeWithText("WRONG STORE PASS").performScrollTo().assertIsDisplayed()
+        } finally {
+            jksFile.delete()
+            dotEnvFile.delete()
+        }
+    }
+
+    @Test
+    fun `projectDrawableInstaller saves icon and adaptive XMLs and CodeExporter bundles them in ZIP`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val bitmap = android.graphics.Bitmap.createBitmap(128, 128, android.graphics.Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.rgb(24, 96, 168))
+        }
+        val projectId = "proj_icon_zip_test"
+        val resDir = com.example.data.ProjectDrawableInstaller.projectResDir(context, projectId)
+        try {
+            val installed = com.example.data.ProjectDrawableInstaller.installLauncherIcon(
+                context = context,
+                projectId = projectId,
+                bitmap = bitmap,
+                resourceName = "ic_launcher_cobalt"
+            )
+            assertEquals("ic_launcher_cobalt", installed.drawableName)
+            assertEquals("#1860A8", installed.backgroundHex)
+            assertTrue(installed.pngFile.isFile && installed.pngFile.length() > 0L)
+            assertTrue(
+                installed.relativePaths.containsAll(
+                    listOf(
+                        "res/drawable/ic_launcher_cobalt.png",
+                        "res/drawable/ic_launcher_foreground.xml",
+                        "res/drawable/ic_launcher_background.xml",
+                        "res/mipmap-anydpi-v26/ic_launcher.xml",
+                        "res/mipmap-anydpi-v26/ic_launcher_round.xml"
+                    )
+                )
+            )
+
+            // Also verify GeminiService.buildImagenPredictRequestJson & parseImagenPredictBitmap
+            val gemini = com.example.data.GeminiService()
+            val composedPrompt = gemini.buildLauncherIconImagenPrompt(
+                userPrompt = "Cobalt compass",
+                designStyle = "Material You",
+                projectName = "CobaltApp"
+            )
+            val predictJson = org.json.JSONObject(
+                gemini.buildImagenPredictRequestJson(prompt = composedPrompt, aspectRatio = "1:1")
+            )
+            assertEquals(1, predictJson.getJSONArray("instances").length())
+            assertEquals("1:1", predictJson.getJSONObject("parameters").getString("aspectRatio"))
+
+            val b64Png = android.util.Base64.encodeToString(installed.pngFile.readBytes(), android.util.Base64.NO_WRAP)
+            val imagenPayload = """{"predictions":[{"bytesBase64Encoded":"$b64Png"}]}"""
+            val decoded = gemini.parseImagenPredictBitmap(imagenPayload)
+            assertEquals(512, decoded.width)
+            assertEquals(512, decoded.height)
+
+            val project = AppProject(
+                id = projectId,
+                name = "CobaltApp",
+                description = "App with generated icon",
+                prompt = "Cobalt tracker",
+                createdAt = 1000L,
+                iconDrawableName = installed.drawableName,
+                iconBackgroundHex = installed.backgroundHex
+            )
+            val roundTrip = AppProject.fromJsonObject(project.toJsonObject())
+            assertEquals(installed.drawableName, roundTrip.iconDrawableName)
+            assertEquals(installed.backgroundHex, roundTrip.iconBackgroundHex)
+            val zipBytes = com.example.data.CodeExporter.buildProjectZip(project, context = context)
+            val entryNames = mutableListOf<String>()
+            java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(zipBytes)).use { zis ->
+                while (true) {
+                    val entry = zis.nextEntry ?: break
+                    entryNames.add(entry.name)
+                }
+            }
+            assertTrue(entryNames.contains("res/drawable/ic_launcher_cobalt.png"))
+            assertTrue(entryNames.contains("res/drawable/ic_launcher_foreground.xml"))
+            assertTrue(entryNames.contains("res/drawable/ic_launcher_background.xml"))
+            assertTrue(entryNames.contains("res/mipmap-anydpi-v26/ic_launcher.xml"))
+        } finally {
+            resDir.parentFile?.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `appIconGeneratorScreen accepts user prompt, submits to Imagen callback, and lists auto-added drawables`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val projectId = "proj_studio_ui_1"
+        val resDir = com.example.data.ProjectDrawableInstaller.projectResDir(context, projectId)
+        val sampleBitmap = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.rgb(16, 185, 129))
+        }
+
+        try {
+            val installed = com.example.data.ProjectDrawableInstaller.installLauncherIcon(
+                context = context,
+                projectId = projectId,
+                bitmap = sampleBitmap,
+                resourceName = "ic_launcher_mint"
+            )
+
+            val project = AppProject(
+                id = projectId,
+                name = "MintWallet",
+                description = "Personal budget organizer",
+                prompt = "Budget planner",
+                createdAt = 1000L,
+                iconDrawableName = installed.drawableName,
+                iconBackgroundHex = installed.backgroundHex
+            )
+
+            var capturedPrompt = ""
+            var capturedStyle = ""
+            var capturedProjectId: String? = null
+            var capturedDrawableName = ""
+
+            val statesMap = mapOf(
+                projectId to AppIconUiState.Success(
+                    bitmap = sampleBitmap,
+                    styleUsed = "3D Glossy",
+                    engineUsed = "Imagen 4",
+                    promptUsed = "Emerald coin vault",
+                    drawableResources = installed.relativePaths,
+                    backgroundHex = installed.backgroundHex,
+                    drawableDirPath = installed.resDir.absolutePath
+                )
+            )
+
+            composeTestRule.setContent {
+                com.example.ui.theme.MyApplicationTheme {
+                    com.example.screens.AppIconGeneratorScreen(
+                        selectedProject = project,
+                        availableProjects = listOf(project),
+                        iconStates = statesMap,
+                        onSelectProject = {},
+                        onGenerateIcon = { prompt, style, proj, drawableName ->
+                            capturedPrompt = prompt
+                            capturedStyle = style
+                            capturedProjectId = proj?.id
+                            capturedDrawableName = drawableName
+                        },
+                        onBack = {}
+                    )
+                }
+            }
+
+            composeTestRule.onNodeWithTag("icon_generator_title").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("icon_generator_prompt_field")
+                .performScrollTo()
+                .performTextReplacement("Minimalist emerald compass icon")
+            composeTestRule.onNodeWithTag("icon_style_chip_3d_glossy").performScrollTo().performClick()
+            composeTestRule.onNodeWithTag("icon_generator_submit_button").performScrollTo().performClick()
+            composeTestRule.waitForIdle()
+
+            assertEquals("Minimalist emerald compass icon", capturedPrompt)
+            assertEquals("3D Glossy", capturedStyle)
+            assertEquals(projectId, capturedProjectId)
+            assertEquals("ic_launcher_mint", capturedDrawableName)
+
+            composeTestRule.onNodeWithTag("icon_generator_preview").performScrollTo().assertIsDisplayed()
+            composeTestRule.onNodeWithText("Imagen 4").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("icon_added_drawables_card").performScrollTo().assertIsDisplayed()
+            composeTestRule.onNodeWithText("res/drawable/ic_launcher_mint.png").performScrollTo().assertIsDisplayed()
+            composeTestRule.onNodeWithText("res/drawable/ic_launcher_foreground.xml").performScrollTo().assertIsDisplayed()
+        } finally {
+            resDir.parentFile?.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `lintAuditScreen scans project and Gradle warnings and resolves them with one-click Fix All`() {
+        val initialProject = AppProject(
+            id = "proj_lint_1",
+            name = "AuditDemoApp",
+            description = "Release app with build warnings",
+            prompt = "Task list",
+            createdAt = 1000L,
+            screens = listOf("HomeScreen"),
+            iconDrawableName = "ic_launcher_custom",
+            buildOptions = com.example.model.BuildOptions(
+                buildVariant = "release",
+                minifyEnabled = false,
+                includeDebuggable = true,
+                shrinkResources = true,
+                targetSdk = 34
+            )
+        )
+
+        val projectState = androidx.compose.runtime.mutableStateOf(initialProject)
+
+        composeTestRule.setContent {
+            com.example.ui.theme.MyApplicationTheme {
+                com.example.screens.LintAuditScreen(
+                    selectedProject = projectState.value,
+                    availableProjects = listOf(projectState.value),
+                    onUpdateProject = { updated -> projectState.value = updated },
+                    initialCustomGradleScript = com.example.data.ProjectLintAuditor.defaultSampleGradleWithWarnings()
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("lint_audit_title").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("lint_audit_summary_card").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("lint_fix_all_button").assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("lint_audit_findings_list")
+            .performScrollToNode(hasTestTag("lint_apply_fix_agp_shrink_without_minify"))
+        composeTestRule.onNodeWithTag("lint_apply_fix_agp_shrink_without_minify").performClick()
+        composeTestRule.waitForIdle()
+
+        assertTrue(projectState.value.buildOptions.minifyEnabled)
+        composeTestRule.onNodeWithTag("lint_finding_card_agp_shrink_without_minify").assertDoesNotExist()
+
+        // Scroll back to Fix All button and resolve remaining auto-fixable Gradle warnings
+        composeTestRule.onNodeWithTag("lint_audit_findings_list")
+            .performScrollToNode(hasTestTag("lint_fix_all_button"))
+        composeTestRule.onNodeWithTag("lint_fix_all_button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(false, projectState.value.buildOptions.includeDebuggable)
+        assertEquals(36, projectState.value.buildOptions.targetSdk)
+        composeTestRule.onNodeWithTag("lint_fix_all_button").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("lint_filter_gradle_build").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("lint_clean_state_card").assertIsDisplayed()
+    }
+
+    @Test
+    fun `dependencyGraphScreen renders native graph, highlights conflicts and outdated libs, and resolves node`() {
+        composeTestRule.setContent {
+            com.example.ui.theme.MyApplicationTheme {
+                com.example.screens.DependencyGraphScreen(
+                    selectedProject = null,
+                    availableProjects = emptyList(),
+                    initialCustomScript = com.example.data.GradleDependencyGraphAnalyzer.defaultConflictDemoGradleScript()
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("dep_graph_title").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("dep_graph_canvas").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("dep_graph_filter_conflict").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("dep_graph_filter_outdated").assertIsDisplayed()
+
+        // Select okhttp conflict node via chip and resolve
+        composeTestRule.onNodeWithTag("dep_graph_node_chip_okhttp").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("dep_graph_node_inspector").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("dep_graph_resolve_node_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Switch to Conflict Sample chip to verify mode selector & flagged list
+        composeTestRule.onNodeWithTag("dep_graph_flagged_list").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun `envSetupScreen guides user through AI keys, live jks validation, and saves dotEnv to workspace`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val keystoreDir = com.example.apk.KeystoreValidator.keystoreDir(context)
+        val jksFile = java.io.File(keystoreDir, "guided-upload.jks")
+        val dotEnvFile = com.example.apk.DotEnvConfigManager.workspaceDotEnvFile(context)
+
+        val keyPair = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        val certDer = com.example.apk.ApkBuilder.generateSelfSignedX509Der(keyPair)
+        val cert = java.security.cert.CertificateFactory.getInstance("X.509")
+            .generateCertificate(java.io.ByteArrayInputStream(certDer)) as java.security.cert.X509Certificate
+
+        val ks = java.security.KeyStore.getInstance("JKS")
+        ks.load(null, null)
+        ks.setKeyEntry("upload", keyPair.private, "wizardStore123".toCharArray(), arrayOf(cert))
+        jksFile.outputStream().use { out -> ks.store(out, "wizardStore123".toCharArray()) }
+
+        try {
+            composeTestRule.setContent {
+                com.example.ui.theme.MyApplicationTheme {
+                    com.example.screens.EnvSetupScreen(
+                        initialDraft = com.example.apk.DotEnvDraft(),
+                        onBack = {}
+                    )
+                }
+            }
+
+            // Step 1: Enter Gemini API Key
+            composeTestRule.onNodeWithTag("env_setup_title").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("env_setup_gemini_key_input")
+                .performScrollTo()
+                .performTextReplacement("AIzaTestKey123456789")
+            composeTestRule.waitForIdle()
+
+            // Advance to Step 2: Keystore Credentials
+            composeTestRule.onNodeWithTag("env_setup_next_step_button").performClick()
+            composeTestRule.waitForIdle()
+
+            composeTestRule.onNodeWithTag("env_setup_jks_chip_guided-upload.jks")
+                .performScrollTo()
+                .performClick()
+            composeTestRule.onNodeWithTag("env_setup_store_password_input")
+                .performScrollTo()
+                .performTextReplacement("wizardStore123")
+            composeTestRule.onNodeWithTag("env_setup_key_password_input")
+                .performScrollTo()
+                .performTextReplacement("wizardStore123")
+            composeTestRule.waitForIdle()
+
+            composeTestRule.onNodeWithTag("env_setup_verify_keystore_button")
+                .performScrollTo()
+                .performClick()
+            composeTestRule.waitUntil(timeoutMillis = 5_000) {
+                composeTestRule.onAllNodesWithText("Keystore Validated Against .env")
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            composeTestRule.onNodeWithTag("env_setup_keystore_validation_card")
+                .performScrollTo()
+                .assertIsDisplayed()
+
+            // Advance to Step 3: Review & Generate .env
+            composeTestRule.onNodeWithTag("env_setup_next_step_button").performClick()
+            composeTestRule.waitForIdle()
+
+            // Unmask preview and verify generated .env lines
+            composeTestRule.onNodeWithTag("env_setup_mask_preview_chip").performScrollTo().performClick()
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("env_setup_preview_box").performScrollTo().assertIsDisplayed()
+            composeTestRule.onNodeWithText("GEMINI_API_KEY=\"AIzaTestKey123456789\"", substring = true)
+                .assertIsDisplayed()
+            composeTestRule.onNodeWithText("STORE_PASSWORD=\"wizardStore123\"", substring = true)
+                .assertIsDisplayed()
+
+            // Save .env to workspace and verify synced Config + KeystoreValidator
+            composeTestRule.onNodeWithTag("env_setup_save_workspace_button")
+                .performScrollTo()
+                .performClick()
+            composeTestRule.waitUntil(timeoutMillis = 5_000) {
+                composeTestRule.onAllNodes(hasTestTag("env_setup_saved_banner"))
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            composeTestRule.onNodeWithTag("env_setup_saved_banner").performScrollTo().assertIsDisplayed()
+
+            assertEquals("AIzaTestKey123456789", com.example.data.CloudAiConfig.effectiveGeminiApiKey())
+            val loadedSigning = com.example.apk.KeystoreValidator.loadEnvSigningConfig(context)
+            assertEquals("guided-upload.jks", loadedSigning.keystorePath)
+            assertEquals("wizardStore123", loadedSigning.storePassword)
+        } finally {
+            jksFile.delete()
+            dotEnvFile.delete()
+            com.example.data.CloudAiConfig.resetForTest()
+        }
+    }
+
+    @Test
+    fun `buildConfigurationScreen release settings panel toggles Minify Enabled and Crunch PNGs without manual gradle edit`() {
+        var savedOptions: com.example.model.BuildOptions? = null
+        val project = AppProject(
+            id = "proj_release_toggles",
+            name = "ReleaseOptimizerApp",
+            description = "Release settings test",
+            prompt = "Offline camera tool",
+            createdAt = 1000L,
+            buildOptions = com.example.model.BuildOptions(
+                buildVariant = "release",
+                minifyEnabled = false,
+                crunchPngs = false
+            )
+        )
+
+        composeTestRule.setContent {
+            com.example.ui.theme.MyApplicationTheme {
+                com.example.screens.BuildConfigurationScreen(
+                    project = project,
+                    onSaveOptions = { savedOptions = it },
+                    onInitiateBuild = {},
+                    onBack = {}
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("release_build_settings_panel").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("Release Build Settings").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Minify Enabled").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Crunch PNGs").assertIsDisplayed()
+
+        // Verify live build.gradle.kts preview initially reflects false/false
+        composeTestRule.onNodeWithTag("release_dsl_preview_box").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("release_dsl_preview_text")
+            .assertTextContains("isMinifyEnabled = false", substring = true)
+            .assertTextContains("isCrunchPngs = false", substring = true)
+
+        // Toggle both switches
+        composeTestRule.onNodeWithTag("toggle_minify_enabled").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("toggle_crunch_pngs").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Live build.gradle.kts preview reflects true/true without manual edits
+        composeTestRule.onNodeWithTag("release_dsl_preview_box").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("release_dsl_preview_text")
+            .assertTextContains("isMinifyEnabled = true", substring = true)
+            .assertTextContains("isCrunchPngs = true", substring = true)
+
+        // Save options and assert BuildOptions persisted both flags
+        composeTestRule.onNodeWithTag("save_build_options_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        assertNotNull(savedOptions)
+        assertTrue(savedOptions!!.minifyEnabled)
+        assertTrue(savedOptions!!.crunchPngs)
+
+        val roundtrip = com.example.model.BuildOptions.fromJsonObject(savedOptions!!.toJsonObject())
+        assertTrue(roundtrip.minifyEnabled)
+        assertTrue(roundtrip.crunchPngs)
+        assertEquals("release", roundtrip.buildVariant)
     }
 }

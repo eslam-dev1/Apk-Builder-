@@ -32,6 +32,9 @@ object GeminiModels {
     const val BEST = "gemini-4-argon"
     const val FALLBACK = "gemini-3.5-flash"
     const val IMAGE_MODEL = "gemini-3-pro-image"
+    const val IMAGEN_PRIMARY = "imagen-4.0-generate-001"
+    const val IMAGEN_FAST = "imagen-4.0-fast-generate-001"
+    const val IMAGEN_3 = "imagen-3.0-generate-002"
 
     private const val PREFS_NAME = "gemini_models_prefs"
     private const val KEY_QUALITY = "quality"
@@ -106,11 +109,36 @@ class GeminiService {
         projectName: String,
         designStyle: String,
         description: String = ""
-    ): Bitmap = withContext(Dispatchers.IO) {
+    ): Bitmap {
+        val defaultPrompt = buildString {
+            append("Android app launcher icon for \"$projectName\"")
+            if (description.isNotBlank()) {
+                append(", concept: $description")
+            }
+        }
+        return generateLauncherIconWithImagen(
+            userPrompt = defaultPrompt,
+            designStyle = designStyle,
+            projectName = projectName,
+            description = description
+        ).first
+    }
+
+    /**
+     * Generates a 1:1 Android launcher icon using Imagen (`:predict`) first,
+     * falling back automatically to Gemini Image generation if Imagen `:predict` is unavailable on the API tier.
+     * Returns Pair(bitmap, engineLabel).
+     */
+    suspend fun generateLauncherIconWithImagen(
+        userPrompt: String,
+        designStyle: String = "Modern",
+        projectName: String = "",
+        description: String = ""
+    ): Pair<Bitmap, String> = withContext(Dispatchers.IO) {
         if (CloudAiConfig.isGeminiKeyMissing()) {
             if (CloudAiConfig.currentProvider.value == CloudAiProvider.OPENROUTER) {
                 throw IllegalStateException(
-                    "AI app icon generation requires GEMINI_API_KEY in AI Studio Secrets (OpenRouter handles text and code generation)."
+                    "Imagen app icon generation requires GEMINI_API_KEY in AI Studio Secrets (OpenRouter handles text and code generation)."
                 )
             }
             throw MissingApiKeyException()
@@ -118,22 +146,50 @@ class GeminiService {
 
         val apiKey = CloudAiConfig.effectiveGeminiApiKey()
         val effectiveStyle = designStyle.ifBlank { "Modern" }
-        val iconPrompt = buildString {
-            append("Create a unique, high-quality Android app launcher icon for an app named \"$projectName\" ")
-            append("in a $effectiveStyle design style.")
-            if (description.isNotBlank()) {
-                append(" App concept: $description.")
+        val composedPrompt = buildLauncherIconImagenPrompt(
+            userPrompt = userPrompt,
+            designStyle = effectiveStyle,
+            projectName = projectName,
+            description = description
+        )
+
+        val predictJson = buildImagenPredictRequestJson(prompt = composedPrompt, aspectRatio = "1:1")
+        val imagenModels = listOf(
+            GeminiModels.IMAGEN_PRIMARY to "Imagen 4",
+            GeminiModels.IMAGEN_FAST to "Imagen 4 Fast",
+            GeminiModels.IMAGEN_3 to "Imagen 3"
+        )
+
+        var lastNon404Error: String? = null
+        for ((modelId, friendlyLabel) in imagenModels) {
+            val res = runCatching {
+                executePredictRequest(
+                    modelName = modelId,
+                    apiKey = apiKey,
+                    requestJson = predictJson
+                )
+            }.getOrNull() ?: continue
+
+            if (res.statusCode in 200..299) {
+                val bitmap = parseImagenPredictBitmap(res.body)
+                return@withContext bitmap to friendlyLabel
             }
-            append(" Centered iconic symbol, vibrant colors, clean vector-inspired composition, rounded square icon aesthetic, no text or letters, studio quality.")
+
+            if (res.statusCode !in setOf(400, 403, 404)) {
+                lastNon404Error = runCatching {
+                    JSONObject(res.body).optJSONObject("error")?.optString("message")
+                }.getOrNull()?.takeIf { it.isNotBlank() } ?: "Imagen API error (HTTP ${res.statusCode})"
+            }
         }
 
-        val requestPayload = JSONObject().apply {
+        // Fallback to Gemini Pro Image (:generateContent)
+        val contentPayload = JSONObject().apply {
             put(
                 "contents",
                 JSONArray().put(
                     JSONObject().put(
                         "parts",
-                        JSONArray().put(JSONObject().put("text", iconPrompt))
+                        JSONArray().put(JSONObject().put("text", composedPrompt))
                     )
                 )
             )
@@ -146,13 +202,92 @@ class GeminiService {
             )
         }.toString()
 
-        val result = executeWithChainAndRetry(
-            models = listOf(GeminiModels.IMAGE_MODEL),
-            apiKey = apiKey,
-            requestJson = requestPayload
-        )
+        val result = try {
+            executeWithChainAndRetry(
+                models = listOf(GeminiModels.IMAGE_MODEL),
+                apiKey = apiKey,
+                requestJson = contentPayload
+            )
+        } catch (err: Exception) {
+            if (!lastNon404Error.isNullOrBlank()) {
+                throw IllegalStateException(lastNon404Error, err)
+            }
+            throw err
+        }
 
-        parseGeneratedIconBitmap(result.body)
+        parseGeneratedIconBitmap(result.body) to "Gemini Image"
+    }
+
+    internal fun buildLauncherIconImagenPrompt(
+        userPrompt: String,
+        designStyle: String,
+        projectName: String = "",
+        description: String = ""
+    ): String {
+        val coreSubject = userPrompt.trim().ifBlank {
+            if (projectName.isNotBlank()) {
+                "distinctive symbol representing $projectName"
+            } else {
+                "modern mobile utility emblem"
+            }
+        }
+        val styleNote = designStyle.ifBlank { "Modern" }
+        return buildString {
+            append("Professional Android mobile app launcher icon, 1:1 square artwork. ")
+            append("Main subject: $coreSubject. ")
+            if (projectName.isNotBlank() && !coreSubject.contains(projectName, ignoreCase = true)) {
+                append("Designed for app \"$projectName\". ")
+            }
+            if (description.isNotBlank() && !coreSubject.contains(description.take(20), ignoreCase = true)) {
+                append("App concept: ${description.take(140)}. ")
+            }
+            append("Visual style: $styleNote, clean centered focal emblem with generous uniform background padding for Android adaptive icon masking, ")
+            append("crisp geometric edges, balanced studio lighting, rich harmonious colors, high contrast silhouette, zero text, zero letters, no watermarks.")
+        }
+    }
+
+    internal fun buildImagenPredictRequestJson(
+        prompt: String,
+        aspectRatio: String = "1:1"
+    ): String {
+        return JSONObject().apply {
+            put(
+                "instances",
+                JSONArray().put(
+                    JSONObject().put("prompt", prompt)
+                )
+            )
+            put(
+                "parameters",
+                JSONObject().apply {
+                    put("sampleCount", 1)
+                    put("aspectRatio", aspectRatio)
+                }
+            )
+        }.toString()
+    }
+
+    internal fun parseImagenPredictBitmap(responseBody: String): Bitmap {
+        val root = JSONObject(responseBody)
+        val predictions = root.optJSONArray("predictions")
+            ?: root.optJSONArray("generatedImages")
+            ?: throw IllegalStateException("No image predictions returned from Imagen API.")
+        if (predictions.length() == 0) {
+            throw IllegalStateException("Imagen API returned an empty predictions list.")
+        }
+
+        for (i in 0 until predictions.length()) {
+            val item = predictions.optJSONObject(i) ?: continue
+            val b64 = item.optString("bytesBase64Encoded").trim()
+                .ifBlank { item.optJSONObject("image")?.optString("bytesBase64Encoded").orEmpty().trim() }
+                .ifBlank { item.optJSONObject("image")?.optString("imageBytes").orEmpty().trim() }
+            if (b64.isNotEmpty()) {
+                val decoded = Base64.decode(b64, Base64.DEFAULT)
+                val bitmap = BitmapFactory.decodeByteArray(decoded, 0, decoded.size)
+                if (bitmap != null) return bitmap
+            }
+        }
+        throw IllegalStateException("Imagen API response did not contain a valid encoded image.")
     }
 
     internal fun buildFeatureIdeasSystemPrompt(): String = """
@@ -500,6 +635,22 @@ class GeminiService {
         }.toString()
     }
 
+    private fun executePredictRequest(
+        modelName: String,
+        apiKey: String,
+        requestJson: String,
+        readTimeoutMs: Int = 90_000
+    ): HttpResponseResult {
+        val endpoint =
+            "https://generativelanguage.googleapis.com/v1beta/models/$modelName:predict"
+        return postJsonRequest(
+            endpoint = endpoint,
+            apiKey = apiKey,
+            requestJson = requestJson,
+            readTimeoutMs = readTimeoutMs
+        )
+    }
+
     private fun executeModelRequest(
         modelName: String,
         apiKey: String,
@@ -508,7 +659,20 @@ class GeminiService {
     ): HttpResponseResult {
         val endpoint =
             "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent"
+        return postJsonRequest(
+            endpoint = endpoint,
+            apiKey = apiKey,
+            requestJson = requestJson,
+            readTimeoutMs = readTimeoutMs
+        )
+    }
 
+    private fun postJsonRequest(
+        endpoint: String,
+        apiKey: String,
+        requestJson: String,
+        readTimeoutMs: Int = 90_000
+    ): HttpResponseResult {
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 30_000

@@ -1,9 +1,14 @@
 package com.example.viewmodel
 
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.ai.LocalLlmEngine
+import com.example.ai.LocalPromptMatcher
 import com.example.ai.ModelManager
+import com.example.ai.OfflineImageOcrExtractor
 import com.example.data.BuildModeStrategy
 import com.example.data.BuildRoutingPlan
 import com.example.data.CloudAiConfig
@@ -13,8 +18,11 @@ import com.example.data.GeminiService
 import com.example.data.GeneratedCodeAnalyzer
 import com.example.data.MissingApiKeyException
 import com.example.data.MissingOpenRouterKeyException
+import com.example.data.OfflineAttemptResult
 import com.example.data.ProjectBuildPlanner
+import com.example.data.ProjectDrawableInstaller
 import com.example.data.ProjectRepository
+import com.example.data.RequirementProfile
 import com.example.design.designFor
 import com.example.model.AiFeatureIdea
 import com.example.model.AppIconUiState
@@ -46,6 +54,9 @@ class GenerateViewModel(
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+
+    private val _isScanningImage = MutableStateFlow(false)
+    val isScanningImage: StateFlow<Boolean> = _isScanningImage.asStateFlow()
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
@@ -129,7 +140,8 @@ class GenerateViewModel(
             strategy = CloudAiConfig.buildModeStrategy.value,
             activeProvider = CloudAiConfig.currentProvider.value,
             installedFiles = ModelManager.installedFiles.value,
-            selectedModelFile = ModelManager.selectedModelFile.value
+            selectedModelFile = ModelManager.selectedModelFile.value,
+            isOfflineRuntimeAvailable = LocalLlmEngine.isNativeRuntimeSupported()
         )
     }
 
@@ -176,7 +188,51 @@ class GenerateViewModel(
         _error.value = null
     }
 
-    fun generateProject(promptInput: String = _prompt.value) {
+    fun generateOfflineScaffold(promptInput: String = _prompt.value) {
+        val cleanPrompt = promptInput.trim()
+        if (cleanPrompt.isBlank()) {
+            _error.value = "Please enter a prompt first"
+            return
+        }
+        val project = LocalPromptMatcher.buildOfflineScaffold(
+            prompt = cleanPrompt,
+            tabPreference = _tabPreference.value
+        )
+        _lastBuildRoutingPlan.value = BuildRoutingPlan(
+            strategy = BuildModeStrategy.OFFLINE,
+            assessment = ProjectBuildPlanner.assessRequirements(cleanPrompt),
+            triedOfflineFirst = true,
+            offlineAttempt = OfflineAttemptResult(
+                succeeded = true,
+                failureReason = "",
+                installedModelFile = "Local Scaffold RAG"
+            ),
+            useCloudAi = false,
+            targetProvider = CloudAiConfig.currentProvider.value,
+            statusSummary = "Generated offline using Local Scaffold RAG (${project.screenSpecs.size} screens)"
+        )
+        _error.value = null
+        _generatedProject.value = project
+    }
+
+    fun extractPromptFromImage(context: Context, imageUri: Uri) {
+        viewModelScope.launch {
+            _isScanningImage.value = true
+            _error.value = null
+            val result = OfflineImageOcrExtractor.extractAppPromptFromImage(context, imageUri)
+            _isScanningImage.value = false
+            result.onSuccess { extractedPrompt ->
+                _prompt.value = extractedPrompt
+            }.onFailure { err ->
+                _error.value = err.localizedMessage ?: "Failed to extract text from selected image."
+            }
+        }
+    }
+
+    fun generateProject(
+        promptInput: String = _prompt.value,
+        context: Context? = null
+    ) {
         val cleanPrompt = promptInput.trim()
         if (cleanPrompt.isBlank()) {
             _error.value = "Please enter a prompt first"
@@ -185,10 +241,41 @@ class GenerateViewModel(
 
         val plan = buildPlanFor(cleanPrompt)
         _lastBuildRoutingPlan.value = plan
+        val activeTabPref = _tabPreference.value
 
         if (!plan.useCloudAi) {
-            _error.value = offlineGenerationMessage()
-            _generatedProject.value = null
+            val offlineModelFile = plan.offlineAttempt?.installedModelFile
+            if (plan.offlineAttempt?.succeeded == true && offlineModelFile != null && context != null) {
+                viewModelScope.launch {
+                    _isLoading.value = true
+                    _error.value = null
+                    try {
+                        val offlineResult = LocalLlmEngine.generateAppProjectOffline(
+                            context = context,
+                            modelFileName = offlineModelFile,
+                            prompt = cleanPrompt,
+                            tabPreference = activeTabPref,
+                            geminiService = geminiService
+                        )
+                        offlineResult.onSuccess { project ->
+                            _generatedProject.value = project
+                        }.onFailure {
+                            // Fall back to deterministic Local Scaffold RAG so Offline Mode completes cleanly
+                            _generatedProject.value = LocalPromptMatcher.buildOfflineScaffold(
+                                prompt = cleanPrompt,
+                                tabPreference = activeTabPref
+                            )
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } finally {
+                        _isLoading.value = false
+                    }
+                }
+            } else {
+                _error.value = offlineGenerationMessage()
+                _generatedProject.value = null
+            }
             return
         }
 
@@ -202,7 +289,6 @@ class GenerateViewModel(
             return
         }
 
-        val activeTabPref = _tabPreference.value
         viewModelScope.launch {
             _isLoading.value = true
             _error.value = null
@@ -233,7 +319,8 @@ class GenerateViewModel(
     fun regenerateProject(
         projectId: String,
         newPromptInput: String,
-        overrideTabPreference: TabBuildPreference = _tabPreference.value
+        overrideTabPreference: TabBuildPreference = _tabPreference.value,
+        context: Context? = null
     ) {
         val cleanPrompt = newPromptInput.trim()
         if (cleanPrompt.isBlank()) {
@@ -245,7 +332,35 @@ class GenerateViewModel(
         _lastBuildRoutingPlan.value = plan
 
         if (!plan.useCloudAi) {
-            _error.value = offlineGenerationMessage()
+            val offlineModelFile = plan.offlineAttempt?.installedModelFile
+            if (plan.offlineAttempt?.succeeded == true && offlineModelFile != null && context != null) {
+                viewModelScope.launch {
+                    _isLoading.value = true
+                    _error.value = null
+                    try {
+                        val offlineResult = LocalLlmEngine.generateAppProjectOffline(
+                            context = context,
+                            modelFileName = offlineModelFile,
+                            prompt = cleanPrompt,
+                            tabPreference = overrideTabPreference,
+                            geminiService = geminiService
+                        )
+                        val generated = offlineResult.getOrElse {
+                            LocalPromptMatcher.buildOfflineScaffold(cleanPrompt, overrideTabPreference)
+                        }
+                        updateSavedProjectInList(
+                            projectId,
+                            generated.copy(id = projectId, prompt = cleanPrompt, createdAt = System.currentTimeMillis())
+                        )
+                    } catch (e: CancellationException) {
+                        throw e
+                    } finally {
+                        _isLoading.value = false
+                    }
+                }
+            } else {
+                _error.value = offlineGenerationMessage()
+            }
             return
         }
 
@@ -286,34 +401,129 @@ class GenerateViewModel(
         }
     }
 
-    fun generateProjectIcon(project: AppProject) {
-        val effectiveStyle = project.designStyle.ifBlank { designFor(project).designStyle }
+    fun generateProjectIcon(
+        project: AppProject,
+        customPrompt: String? = null,
+        styleOverride: String? = null,
+        drawableName: String = ProjectDrawableInstaller.DEFAULT_DRAWABLE_NAME,
+        context: Context? = null
+    ) {
+        val effectiveStyle = styleOverride?.takeIf { it.isNotBlank() }
+            ?: project.designStyle.ifBlank { designFor(project).designStyle }
+        val effectivePrompt = customPrompt?.takeIf { it.isNotBlank() }
+            ?: "Android app launcher icon for \"${project.name}\": ${project.description}"
+        generateLauncherIconInternal(
+            stateKey = project.id,
+            targetProject = project,
+            prompt = effectivePrompt,
+            style = effectiveStyle,
+            drawableName = drawableName,
+            context = context
+        )
+    }
+
+    fun generateLauncherIconFromStudio(
+        prompt: String,
+        style: String,
+        targetProject: AppProject?,
+        drawableName: String = ProjectDrawableInstaller.DEFAULT_DRAWABLE_NAME,
+        context: Context? = null
+    ) {
+        val key = targetProject?.id ?: ProjectDrawableInstaller.DEFAULT_WORKSPACE_ID
+        val effectivePrompt = prompt.trim().ifBlank {
+            if (targetProject != null) {
+                "Android app launcher icon for \"${targetProject.name}\": ${targetProject.description}"
+            } else {
+                ""
+            }
+        }
+        if (effectivePrompt.isBlank()) {
+            _appIconStates.update {
+                it + (key to AppIconUiState.Error("Please enter a prompt describing the launcher icon."))
+            }
+            return
+        }
+        generateLauncherIconInternal(
+            stateKey = key,
+            targetProject = targetProject,
+            prompt = effectivePrompt,
+            style = style.ifBlank { "Modern" },
+            drawableName = drawableName,
+            context = context
+        )
+    }
+
+    private fun generateLauncherIconInternal(
+        stateKey: String,
+        targetProject: AppProject?,
+        prompt: String,
+        style: String,
+        drawableName: String,
+        context: Context?
+    ) {
         viewModelScope.launch {
-            _appIconStates.update { it + (project.id to AppIconUiState.Loading) }
+            _appIconStates.update { it + (stateKey to AppIconUiState.Loading) }
             try {
-                val bitmap = withTimeout(120_000L) {
-                    geminiService.generateAppIcon(
-                        projectName = project.name,
-                        designStyle = effectiveStyle,
-                        description = project.description
+                val (bitmap, engineLabel) = withTimeout(120_000L) {
+                    geminiService.generateLauncherIconWithImagen(
+                        userPrompt = prompt,
+                        designStyle = style,
+                        projectName = targetProject?.name.orEmpty(),
+                        description = targetProject?.description.orEmpty()
                     )
                 }
+
+                var installedPaths = emptyList<String>()
+                var backgroundHex = ""
+                var drawableDirPath = ""
+                if (context != null) {
+                    val installed = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        ProjectDrawableInstaller.installLauncherIcon(
+                            context = context,
+                            projectId = stateKey,
+                            bitmap = bitmap,
+                            resourceName = drawableName
+                        )
+                    }
+                    installedPaths = installed.relativePaths
+                    backgroundHex = installed.backgroundHex
+                    drawableDirPath = installed.resDir.absolutePath
+
+                    if (targetProject != null) {
+                        val updated = targetProject.copy(
+                            iconDrawableName = installed.drawableName,
+                            iconBackgroundHex = installed.backgroundHex
+                        )
+                        updateSavedProjectInList(targetProject.id, updated)
+                    }
+                }
+
                 _appIconStates.update {
-                    it + (project.id to AppIconUiState.Success(bitmap = bitmap, styleUsed = effectiveStyle))
+                    it + (
+                        stateKey to AppIconUiState.Success(
+                            bitmap = bitmap,
+                            styleUsed = style,
+                            engineUsed = engineLabel,
+                            promptUsed = prompt,
+                            drawableResources = installedPaths,
+                            backgroundHex = backgroundHex,
+                            drawableDirPath = drawableDirPath
+                        )
+                    )
                 }
             } catch (e: TimeoutCancellationException) {
                 _appIconStates.update {
-                    it + (project.id to AppIconUiState.Error("Icon generation timed out after 120 seconds."))
+                    it + (stateKey to AppIconUiState.Error("Icon generation timed out after 120 seconds."))
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: MissingApiKeyException) {
                 _appIconStates.update {
-                    it + (project.id to AppIconUiState.Error("API Key missing. Configure GEMINI_API_KEY in AI Studio Secrets."))
+                    it + (stateKey to AppIconUiState.Error("API Key missing. Configure GEMINI_API_KEY in AI Studio Secrets."))
                 }
             } catch (e: Exception) {
                 _appIconStates.update {
-                    it + (project.id to AppIconUiState.Error(e.message ?: "Failed to generate AI app icon."))
+                    it + (stateKey to AppIconUiState.Error(e.message ?: "Failed to generate AI app icon."))
                 }
             }
         }

@@ -39,11 +39,19 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.data.CloudAiConfig
+import com.example.data.ProjectDrawableInstaller
 import com.example.data.ProjectRepository
 import com.example.model.AppIconUiState
+import com.example.screens.AppIconGeneratorScreen
+import com.example.screens.BuildConfigurationScreen
 import com.example.screens.CreateScreen
+import com.example.screens.DependencyGraphScreen
+import com.example.screens.EnvSetupScreen
 import com.example.screens.HomeScreen
+import com.example.screens.LintAuditScreen
 import com.example.screens.LivePreviewScreen
+import com.example.screens.LocalAiManagerScreen
 import com.example.screens.ModelStatusScreen
 import com.example.screens.OnboardingScreen
 import com.example.screens.ProjectDetailsScreen
@@ -57,8 +65,18 @@ const val ROUTE_ONBOARDING = "onboarding"
 const val ROUTE_HOME = "home"
 const val ROUTE_CREATE = "create"
 const val ROUTE_MODEL_STATUS = "modelStatus"
+const val ROUTE_LOCAL_AI_MANAGER = "localAiManager"
+const val ROUTE_LOCAL_AI_MANAGER_FOR_PROJECT = "localAiManager/{projectId}"
+const val ROUTE_APP_ICON_GENERATOR = "appIconGenerator"
+const val ROUTE_APP_ICON_GENERATOR_FOR_PROJECT = "appIconGenerator/{projectId}"
+const val ROUTE_LINT_AUDIT = "lintAudit"
+const val ROUTE_LINT_AUDIT_FOR_PROJECT = "lintAudit/{projectId}"
+const val ROUTE_DEPENDENCY_GRAPH = "dependencyGraph"
+const val ROUTE_DEPENDENCY_GRAPH_FOR_PROJECT = "dependencyGraph/{projectId}"
+const val ROUTE_ENV_SETUP = "envSetup"
 const val ROUTE_PROJECTS = "projects"
 const val ROUTE_DETAILS = "details/{projectId}"
+const val ROUTE_BUILD_CONFIG = "buildConfig/{projectId}"
 const val ROUTE_LIVE_PREVIEW = "livePreview/{projectId}"
 const val ROUTE_SETTINGS = "settings"
 
@@ -70,7 +88,13 @@ fun AppNavGraph() {
         factory = GenerateViewModelFactory(projectRepository)
     )
 
-    MyApplicationTheme {
+    val isDarkMode by CloudAiConfig.isDarkMode.collectAsStateWithLifecycle()
+    val isDynamicColor by CloudAiConfig.isDynamicColor.collectAsStateWithLifecycle()
+
+    MyApplicationTheme(
+        darkTheme = isDarkMode,
+        dynamicColor = isDynamicColor
+    ) {
         val isFirstLaunch by generateViewModel.isFirstLaunch.collectAsStateWithLifecycle()
 
         // Wait briefly while DataStore reads firstLaunch flag
@@ -145,7 +169,8 @@ fun AppNavGraph() {
                         )
 
                         NavigationBarItem(
-                            selected = currentRoute == ROUTE_MODEL_STATUS,
+                            selected = currentRoute == ROUTE_MODEL_STATUS ||
+                                currentRoute.startsWith(ROUTE_LOCAL_AI_MANAGER),
                             onClick = {
                                 navController.navigate(ROUTE_MODEL_STATUS) {
                                     popUpTo(navController.graph.findStartDestination().id) {
@@ -157,7 +182,9 @@ fun AppNavGraph() {
                             },
                             icon = {
                                 Icon(
-                                    imageVector = if (currentRoute == ROUTE_MODEL_STATUS) Icons.Filled.Memory else Icons.Outlined.Memory,
+                                    imageVector = if (currentRoute == ROUTE_MODEL_STATUS ||
+                                        currentRoute.startsWith(ROUTE_LOCAL_AI_MANAGER)
+                                    ) Icons.Filled.Memory else Icons.Outlined.Memory,
                                     contentDescription = "Models"
                                 )
                             },
@@ -224,6 +251,11 @@ fun AppNavGraph() {
                         onCreateClick = { navController.navigate(ROUTE_CREATE) },
                         onProjectsClick = { navController.navigate(ROUTE_PROJECTS) },
                         onModelStatusClick = { navController.navigate(ROUTE_MODEL_STATUS) },
+                        onLocalAiManagerClick = { navController.navigate(ROUTE_LOCAL_AI_MANAGER) },
+                        onAppIconGeneratorClick = { navController.navigate(ROUTE_APP_ICON_GENERATOR) },
+                        onLintAuditClick = { navController.navigate(ROUTE_LINT_AUDIT) },
+                        onDependencyGraphClick = { navController.navigate(ROUTE_DEPENDENCY_GRAPH) },
+                        onEnvSetupClick = { navController.navigate(ROUTE_ENV_SETUP) },
                         onOpenProject = { projectId ->
                             generateViewModel.clearError()
                             navController.navigate("details/$projectId")
@@ -249,6 +281,13 @@ fun AppNavGraph() {
                         },
                         onOpenModels = {
                             navController.navigate(ROUTE_MODEL_STATUS)
+                        },
+                        onOpenIconStudio = { projectId ->
+                            if (projectId.isNullOrBlank()) {
+                                navController.navigate(ROUTE_APP_ICON_GENERATOR)
+                            } else {
+                                navController.navigate("appIconGenerator/$projectId")
+                            }
                         }
                     )
                 }
@@ -276,13 +315,25 @@ fun AppNavGraph() {
                     val projectId = backStackEntry.arguments?.getString("projectId").orEmpty()
                     val project = savedProjects.find { it.id == projectId }
                         ?: generateViewModel.getProjectById(projectId)
+                    val triggerBuildOnResume = backStackEntry.savedStateHandle.get<Boolean>("trigger_build_on_resume") ?: false
                     ProjectDetailsScreen(
                         project = project,
                         isRegenerating = isLoading,
                         errorMessage = error,
                         appIconState = appIconStates[projectId] ?: AppIconUiState.Idle,
                         onGenerateAppIcon = { targetProject ->
-                            generateViewModel.generateProjectIcon(targetProject)
+                            generateViewModel.generateProjectIcon(targetProject, context = context)
+                        },
+                        onGenerateCustomAppIcon = { targetProject, customPrompt, style ->
+                            generateViewModel.generateProjectIcon(
+                                project = targetProject,
+                                customPrompt = customPrompt,
+                                styleOverride = style,
+                                context = context
+                            )
+                        },
+                        onOpenIconStudio = { id ->
+                            navController.navigate("appIconGenerator/$id")
                         },
                         aiFeatureIdeas = aiFeatureSuggestions[projectId].orEmpty(),
                         isAnalyzingFeatures = isAnalyzingFeatures,
@@ -305,6 +356,13 @@ fun AppNavGraph() {
                         onLivePreview = { id ->
                             navController.navigate("livePreview/$id")
                         },
+                        onConfigureBuild = { id ->
+                            navController.navigate("buildConfig/$id")
+                        },
+                        triggerBuildOnResume = triggerBuildOnResume,
+                        onResetTriggerBuild = {
+                            backStackEntry.savedStateHandle["trigger_build_on_resume"] = false
+                        },
                         onDeleteProject = { idToDelete ->
                             generateViewModel.deleteProject(idToDelete)
                             navController.navigate(ROUTE_PROJECTS) {
@@ -323,6 +381,43 @@ fun AppNavGraph() {
                 }
 
                 composable(
+                    route = ROUTE_BUILD_CONFIG,
+                    arguments = listOf(navArgument("projectId") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val projectId = backStackEntry.arguments?.getString("projectId").orEmpty()
+                    val project = savedProjects.find { it.id == projectId }
+                        ?: generateViewModel.getProjectById(projectId)
+                    BuildConfigurationScreen(
+                        project = project,
+                        onSaveOptions = { newOptions ->
+                            if (project != null) {
+                                generateViewModel.updateProject(project.copy(buildOptions = newOptions))
+                            }
+                        },
+                        onInitiateBuild = { newOptions ->
+                            if (project != null) {
+                                generateViewModel.updateProject(project.copy(buildOptions = newOptions))
+                            }
+                            navController.previousBackStackEntry?.savedStateHandle?.set("trigger_build_on_resume", true)
+                            navController.popBackStack()
+                        },
+                        onOpenLocalAiManager = {
+                            navController.navigate("localAiManager/$projectId")
+                        },
+                        onOpenLintAudit = {
+                            navController.navigate("lintAudit/$projectId")
+                        },
+                        onOpenDependencyGraph = {
+                            navController.navigate("dependencyGraph/$projectId")
+                        },
+                        onOpenEnvSetup = {
+                            navController.navigate(ROUTE_ENV_SETUP)
+                        },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(
                     route = ROUTE_LIVE_PREVIEW,
                     arguments = listOf(navArgument("projectId") { type = NavType.StringType })
                 ) { backStackEntry ->
@@ -337,6 +432,216 @@ fun AppNavGraph() {
 
                 composable(ROUTE_MODEL_STATUS) {
                     ModelStatusScreen(
+                        onBack = { navController.popBackStack() },
+                        onOpenCreate = {
+                            navController.navigate(ROUTE_CREATE) {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    saveState = true
+                                }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                        onOpenLocalAiManager = {
+                            navController.navigate(ROUTE_LOCAL_AI_MANAGER)
+                        }
+                    )
+                }
+
+                composable(ROUTE_LOCAL_AI_MANAGER) {
+                    val selectedIdState = androidx.compose.runtime.saveable.rememberSaveable {
+                        androidx.compose.runtime.mutableStateOf<String?>(null)
+                    }
+                    val targetProject = savedProjects.find { it.id == selectedIdState.value }
+                        ?: savedProjects.firstOrNull()
+                    LocalAiManagerScreen(
+                        project = targetProject,
+                        availableProjects = savedProjects,
+                        onSelectProject = { selectedId -> selectedIdState.value = selectedId },
+                        onUpdateEnabledModels = { targetId, models ->
+                            val proj = targetId?.let { id -> savedProjects.find { it.id == id } }
+                            if (proj != null) {
+                                generateViewModel.updateProject(
+                                    proj.copy(buildOptions = proj.buildOptions.copy(bundledTfliteModels = models))
+                                )
+                            }
+                        },
+                        onOpenBuildConfig = { id ->
+                            navController.navigate("buildConfig/$id")
+                        },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(
+                    route = ROUTE_LOCAL_AI_MANAGER_FOR_PROJECT,
+                    arguments = listOf(navArgument("projectId") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val projectId = backStackEntry.arguments?.getString("projectId").orEmpty()
+                    val targetProject = savedProjects.find { it.id == projectId }
+                        ?: generateViewModel.getProjectById(projectId)
+                    LocalAiManagerScreen(
+                        project = targetProject,
+                        availableProjects = savedProjects,
+                        onSelectProject = { nextId ->
+                            if (nextId != projectId) {
+                                navController.navigate("localAiManager/$nextId") {
+                                    popUpTo("localAiManager/$projectId") { inclusive = true }
+                                }
+                            }
+                        },
+                        onUpdateEnabledModels = { targetId, models ->
+                            val proj = (targetId?.let { savedProjects.find { p -> p.id == it } }) ?: targetProject
+                            if (proj != null) {
+                                generateViewModel.updateProject(
+                                    proj.copy(buildOptions = proj.buildOptions.copy(bundledTfliteModels = models))
+                                )
+                            }
+                        },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(ROUTE_APP_ICON_GENERATOR) {
+                    val selectedIdState = androidx.compose.runtime.saveable.rememberSaveable {
+                        androidx.compose.runtime.mutableStateOf<String?>(savedProjects.firstOrNull()?.id)
+                    }
+                    val targetProject = selectedIdState.value?.let { id ->
+                        savedProjects.find { it.id == id } ?: generateViewModel.getProjectById(id)
+                    }
+                    AppIconGeneratorScreen(
+                        selectedProject = targetProject,
+                        availableProjects = savedProjects,
+                        iconStates = appIconStates,
+                        onSelectProject = { nextId -> selectedIdState.value = nextId },
+                        onGenerateIcon = { prompt, style, proj, drawableName ->
+                            generateViewModel.generateLauncherIconFromStudio(
+                                prompt = prompt,
+                                style = style,
+                                targetProject = proj,
+                                drawableName = drawableName,
+                                context = context
+                            )
+                        },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(
+                    route = ROUTE_APP_ICON_GENERATOR_FOR_PROJECT,
+                    arguments = listOf(navArgument("projectId") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val projectId = backStackEntry.arguments?.getString("projectId").orEmpty()
+                    val selectedIdState = androidx.compose.runtime.saveable.rememberSaveable(projectId) {
+                        androidx.compose.runtime.mutableStateOf<String?>(projectId)
+                    }
+                    val targetProject = selectedIdState.value?.let { id ->
+                        savedProjects.find { it.id == id } ?: generateViewModel.getProjectById(id)
+                    }
+                    AppIconGeneratorScreen(
+                        selectedProject = targetProject,
+                        availableProjects = savedProjects,
+                        iconStates = appIconStates,
+                        onSelectProject = { nextId -> selectedIdState.value = nextId },
+                        onGenerateIcon = { prompt, style, proj, drawableName ->
+                            generateViewModel.generateLauncherIconFromStudio(
+                                prompt = prompt,
+                                style = style,
+                                targetProject = proj,
+                                drawableName = drawableName,
+                                context = context
+                            )
+                        },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(ROUTE_LINT_AUDIT) {
+                    val selectedIdState = androidx.compose.runtime.saveable.rememberSaveable {
+                        androidx.compose.runtime.mutableStateOf<String?>(savedProjects.firstOrNull()?.id)
+                    }
+                    val targetProject = selectedIdState.value?.let { id ->
+                        savedProjects.find { it.id == id } ?: generateViewModel.getProjectById(id)
+                    }
+                    LintAuditScreen(
+                        selectedProject = targetProject,
+                        availableProjects = savedProjects,
+                        onSelectProject = { nextId -> selectedIdState.value = nextId },
+                        onUpdateProject = { updated -> generateViewModel.updateProject(updated) },
+                        onOpenBuildConfig = { id -> navController.navigate("buildConfig/$id") },
+                        onOpenDependencyGraph = {
+                            val id = targetProject?.id
+                            if (id.isNullOrBlank()) {
+                                navController.navigate(ROUTE_DEPENDENCY_GRAPH)
+                            } else {
+                                navController.navigate("dependencyGraph/$id")
+                            }
+                        },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(
+                    route = ROUTE_LINT_AUDIT_FOR_PROJECT,
+                    arguments = listOf(navArgument("projectId") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val projectId = backStackEntry.arguments?.getString("projectId").orEmpty()
+                    val selectedIdState = androidx.compose.runtime.saveable.rememberSaveable(projectId) {
+                        androidx.compose.runtime.mutableStateOf<String?>(projectId)
+                    }
+                    val targetProject = selectedIdState.value?.let { id ->
+                        savedProjects.find { it.id == id } ?: generateViewModel.getProjectById(id)
+                    }
+                    LintAuditScreen(
+                        selectedProject = targetProject,
+                        availableProjects = savedProjects,
+                        onSelectProject = { nextId -> selectedIdState.value = nextId },
+                        onUpdateProject = { updated -> generateViewModel.updateProject(updated) },
+                        onOpenBuildConfig = { id -> navController.navigate("buildConfig/$id") },
+                        onOpenDependencyGraph = {
+                            val id = targetProject?.id ?: projectId
+                            navController.navigate("dependencyGraph/$id")
+                        },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(ROUTE_DEPENDENCY_GRAPH) {
+                    val selectedIdState = androidx.compose.runtime.saveable.rememberSaveable {
+                        androidx.compose.runtime.mutableStateOf<String?>(savedProjects.firstOrNull()?.id)
+                    }
+                    val targetProject = selectedIdState.value?.let { id ->
+                        savedProjects.find { it.id == id } ?: generateViewModel.getProjectById(id)
+                    }
+                    DependencyGraphScreen(
+                        selectedProject = targetProject,
+                        availableProjects = savedProjects,
+                        onSelectProject = { nextId -> selectedIdState.value = nextId },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(
+                    route = ROUTE_DEPENDENCY_GRAPH_FOR_PROJECT,
+                    arguments = listOf(navArgument("projectId") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val projectId = backStackEntry.arguments?.getString("projectId").orEmpty()
+                    val selectedIdState = androidx.compose.runtime.saveable.rememberSaveable(projectId) {
+                        androidx.compose.runtime.mutableStateOf<String?>(projectId)
+                    }
+                    val targetProject = selectedIdState.value?.let { id ->
+                        savedProjects.find { it.id == id } ?: generateViewModel.getProjectById(id)
+                    }
+                    DependencyGraphScreen(
+                        selectedProject = targetProject,
+                        availableProjects = savedProjects,
+                        onSelectProject = { nextId -> selectedIdState.value = nextId },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(ROUTE_ENV_SETUP) {
+                    EnvSetupScreen(
                         onBack = { navController.popBackStack() }
                     )
                 }
@@ -347,6 +652,7 @@ fun AppNavGraph() {
                         totalProjectsCount = savedProjects.size,
                         onClearAllProjects = { generateViewModel.clearAllProjects() },
                         onOpenModelStatus = { navController.navigate(ROUTE_MODEL_STATUS) },
+                        onOpenEnvSetup = { navController.navigate(ROUTE_ENV_SETUP) },
                         // Back from Settings always goes to Home
                         onBack = {
                             navController.navigate(ROUTE_HOME) {

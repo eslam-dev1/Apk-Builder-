@@ -20,14 +20,23 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.FactCheck
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AddCircleOutline
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.CloudAiConfig
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -63,10 +72,17 @@ fun HomeScreen(
     onCreateClick: () -> Unit,
     onProjectsClick: () -> Unit = {},
     onModelStatusClick: () -> Unit = {},
+    onLocalAiManagerClick: () -> Unit = {},
+    onAppIconGeneratorClick: () -> Unit = {},
+    onLintAuditClick: () -> Unit = {},
+    onDependencyGraphClick: () -> Unit = {},
+    onEnvSetupClick: () -> Unit = {},
     onOpenProject: (String) -> Unit = {},
     onSettingsClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val isDarkMode by CloudAiConfig.isDarkMode.collectAsStateWithLifecycle()
     var searchQuery by rememberSaveable { mutableStateOf("") }
     val filteredProjects = if (searchQuery.isBlank()) {
         projects
@@ -111,14 +127,32 @@ fun HomeScreen(
                     )
                 }
 
-                IconButton(
-                    onClick = onSettingsClick,
-                    modifier = Modifier.testTag("home_settings_button")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = "Settings"
-                    )
+                    IconButton(
+                        onClick = {
+                            CloudAiConfig.setDarkMode(context, !isDarkMode)
+                        },
+                        modifier = Modifier.testTag("home_theme_toggle_button")
+                    ) {
+                        Icon(
+                            imageVector = if (isDarkMode) Icons.Default.WbSunny else Icons.Default.DarkMode,
+                            contentDescription = "Toggle Light/Dark Theme",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onSettingsClick,
+                        modifier = Modifier.testTag("home_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Settings"
+                        )
+                    }
                 }
             }
 
@@ -231,25 +265,161 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            OutlinedButton(
-                onClick = onModelStatusClick,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.7f)),
-                contentPadding = PaddingValues(vertical = 12.dp, horizontal = 16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("home_model_status_button")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.Memory,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Offline Model Status (Gemma 4 & Qwen 3)",
-                    fontWeight = FontWeight.SemiBold
-                )
+                OutlinedButton(
+                    onClick = onModelStatusClick,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.7f)),
+                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("home_model_status_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Memory,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Model Hub",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onLocalAiManagerClick,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)),
+                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("home_local_ai_manager_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Local AI Manager",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onAppIconGeneratorClick,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.7f)),
+                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("home_app_icon_generator_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Brush,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Icon Studio",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onLintAuditClick,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.7f)),
+                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("home_lint_audit_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.FactCheck,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Lint & Audit",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onDependencyGraphClick,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)),
+                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("home_dependency_graph_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AccountTree,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Dependencies",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onEnvSetupClick,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.65f)),
+                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("home_env_setup_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.VpnKey,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = ".env Setup",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(20.dp))

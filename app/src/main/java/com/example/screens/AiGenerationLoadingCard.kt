@@ -243,6 +243,9 @@ fun AiGenerationLoadingCard(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(2.dp))
+            AiCodeTypingTape(accentColor = accentColor)
         }
     }
 }

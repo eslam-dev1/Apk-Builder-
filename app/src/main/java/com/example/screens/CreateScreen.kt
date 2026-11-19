@@ -1,6 +1,13 @@
 package com.example.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -34,9 +41,13 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CheckCircleOutline
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.OfflineBolt
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.ViewCarousel
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AssistChip
@@ -46,6 +57,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -58,6 +70,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -70,6 +83,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ai.ModelManager
+import com.example.ai.OfflineSpeechDictation
 import com.example.data.BuildModeStrategy
 import com.example.data.CloudAiConfig
 import com.example.data.CloudAiProvider
@@ -103,6 +117,7 @@ fun CreateScreen(
     onPreviewNow: (String) -> Unit = {},
     onOpenSettings: () -> Unit = {},
     onOpenModels: () -> Unit = {},
+    onOpenIconStudio: (String?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBack)
@@ -111,9 +126,11 @@ fun CreateScreen(
     val prompt by viewModel.prompt.collectAsStateWithLifecycle()
     val generatedProject by viewModel.generatedProject.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val isScanningImage by viewModel.isScanningImage.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val appIconStates by viewModel.appIconStates.collectAsStateWithLifecycle()
     val codeAnalysisStates by viewModel.codeAnalysisStates.collectAsStateWithLifecycle()
+    val voiceState by OfflineSpeechDictation.state.collectAsStateWithLifecycle()
 
     val activeProvider by CloudAiConfig.currentProvider.collectAsStateWithLifecycle()
     val buildModeStrategy by CloudAiConfig.buildModeStrategy.collectAsStateWithLifecycle()
@@ -125,9 +142,42 @@ fun CreateScreen(
     val selectedModelFile by ModelManager.selectedModelFile.collectAsStateWithLifecycle()
     val requirementAssessment = remember(prompt) { ProjectBuildPlanner.assessRequirements(prompt) }
 
+    val startVoiceCapture = remember(context, prompt) {
+        {
+            OfflineSpeechDictation.startListening(context) { recognized ->
+                val merged = if (prompt.isBlank()) recognized else "${prompt.trim()} $recognized"
+                viewModel.onPromptChange(merged)
+            }
+        }
+    }
+
+    val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            startVoiceCapture()
+        } else {
+            viewModel.clearError()
+        }
+    }
+
+    val imageOcrPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            viewModel.extractPromptFromImage(context, uri)
+        }
+    }
+
     LaunchedEffect(Unit) {
         CloudAiConfig.load(context)
         ModelManager.refreshState(context)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            OfflineSpeechDictation.stopListening()
+        }
     }
 
     Box(
@@ -187,7 +237,95 @@ fun CreateScreen(
                         .testTag("prompt_text_field")
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Local Multimodal AI Input Tools (Offline Voice & Offline Screenshot OCR)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    AssistChip(
+                        onClick = {
+                            if (voiceState.isListening) {
+                                OfflineSpeechDictation.stopListening()
+                            } else {
+                                val hasMic = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (hasMic) {
+                                    startVoiceCapture()
+                                } else {
+                                    recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            }
+                        },
+                        enabled = !isLoading,
+                        leadingIcon = {
+                            Icon(
+                                imageVector = if (voiceState.isListening) Icons.Default.Stop else Icons.Default.Mic,
+                                contentDescription = if (voiceState.isListening) "Stop dictation" else "Voice dictate prompt",
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        label = {
+                            Text(if (voiceState.isListening) "Stop Listening" else "Voice Dictate")
+                        },
+                        modifier = Modifier.testTag("create_voice_dictate_button")
+                    )
+
+                    AssistChip(
+                        onClick = {
+                            imageOcrPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        enabled = !isLoading && !isScanningImage,
+                        leadingIcon = {
+                            if (isScanningImage) {
+                                CircularProgressIndicator(
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.DocumentScanner,
+                                    contentDescription = "Extract app prompt from screenshot or sketch",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        },
+                        label = {
+                            Text(if (isScanningImage) "Scanning Image..." else "Scan UI (OCR)")
+                        },
+                        modifier = Modifier.testTag("create_ocr_image_button")
+                    )
+                }
+
+                if (voiceState.isListening || voiceState.partialText.isNotBlank() || voiceState.errorMessage != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = when {
+                            voiceState.isListening && voiceState.partialText.isNotBlank() ->
+                                "Listening: \"${voiceState.partialText}\""
+                            voiceState.isListening ->
+                                "Listening offline via SpeechRecognizer..."
+                            voiceState.errorMessage != null ->
+                                voiceState.errorMessage.orEmpty()
+                            else -> ""
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (voiceState.errorMessage != null) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier.testTag("create_voice_status_text")
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // AI Provider Selector (Gemini vs OpenRouter)
                 Row(
@@ -525,7 +663,7 @@ fun CreateScreen(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Button(
-                    onClick = { viewModel.generateProject(prompt) },
+                    onClick = { viewModel.generateProject(prompt, context) },
                     enabled = prompt.isNotBlank() && !isLoading,
                     contentPadding = PaddingValues(vertical = 14.dp),
                     modifier = Modifier
@@ -549,6 +687,25 @@ fun CreateScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Generate")
                     }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                FilledTonalButton(
+                    onClick = { viewModel.generateOfflineScaffold(prompt) },
+                    enabled = prompt.isNotBlank() && !isLoading,
+                    contentPadding = PaddingValues(vertical = 12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("generate_offline_scaffold_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.OfflineBolt,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Instant Offline Scaffold (Local RAG)")
                 }
 
                 Spacer(modifier = Modifier.height(20.dp))
@@ -712,8 +869,17 @@ fun CreateScreen(
                                     project = project,
                                     iconState = appIconStates[project.id] ?: AppIconUiState.Idle,
                                     onGenerateIcon = { targetProject ->
-                                        viewModel.generateProjectIcon(targetProject)
+                                        viewModel.generateProjectIcon(targetProject, context = context)
                                     },
+                                    onGenerateCustomIcon = { customPrompt, style ->
+                                        viewModel.generateProjectIcon(
+                                            project = project,
+                                            customPrompt = customPrompt,
+                                            styleOverride = style,
+                                            context = context
+                                        )
+                                    },
+                                    onOpenIconStudio = { onOpenIconStudio(project.id) },
                                     accentColor = primaryAccent
                                 )
 
@@ -765,30 +931,32 @@ fun CreateScreen(
                                         modifier = Modifier.testTag("generated_screens_list")
                                     ) {
                                         screenSpecs.forEach { spec ->
-                                            AssistChip(
-                                                onClick = {},
-                                                leadingIcon = {
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = BorderStroke(
+                                                    1.dp,
+                                                    primaryAccent.copy(alpha = 0.6f)
+                                                ),
+                                                color = primaryAccent.copy(alpha = 0.1f)
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
                                                     Icon(
                                                         imageVector = ScreenIcons.vector(spec.icon),
                                                         contentDescription = null,
                                                         tint = primaryAccent,
                                                         modifier = Modifier.size(16.dp)
                                                     )
-                                                },
-                                                label = {
                                                     Text(
                                                         text = ScreenSpecs.labelFor(project, spec.name),
+                                                        style = MaterialTheme.typography.labelMedium,
                                                         color = cardContent
                                                     )
-                                                },
-                                                border = BorderStroke(
-                                                    1.dp,
-                                                    primaryAccent.copy(alpha = 0.6f)
-                                                ),
-                                                colors = AssistChipDefaults.assistChipColors(
-                                                    containerColor = primaryAccent.copy(alpha = 0.1f)
-                                                )
-                                            )
+                                                }
+                                            }
                                         }
                                     }
                                 }

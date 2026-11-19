@@ -14,7 +14,9 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.android.apksig.ApkSigner
 import com.android.apksig.ApkVerifier
+import com.example.ai.TfliteModelManager
 import com.example.data.CodeExporter
+import com.example.data.ProjectDrawableInstaller
 import com.example.design.ScreenSpecs
 import com.example.model.AppProject
 import java.io.ByteArrayInputStream
@@ -61,7 +63,18 @@ data class ApkTemplateConfig(
     val name: String,
     val description: String,
     val features: List<String>,
-    val screens: List<String>
+    val screens: List<String>,
+    val buildVariant: String = "debug",
+    val minifyEnabled: Boolean = false,
+    val crunchPngs: Boolean = false,
+    val includeDebuggable: Boolean = true,
+    val shrinkResources: Boolean = false,
+    val targetSdk: Int = 36,
+    val versionName: String = "1.0",
+    val versionCode: Int = 1,
+    val bundledTfliteModels: List<String> = emptyList(),
+    val iconDrawableName: String = "",
+    val iconBackgroundHex: String = ""
 )
 
 object ApkBuilder {
@@ -98,9 +111,33 @@ object ApkBuilder {
     suspend fun buildApk(
         project: AppProject,
         context: Context,
+        onLog: (String) -> Unit = {},
         onProgress: (String) -> Unit = {}
     ): Result<File> = withContext(Dispatchers.IO) {
         val safeName = CodeExporter.toSafeFileName(project.name)
+        val timeFormat = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+        fun log(msg: String) {
+            val timestamp = timeFormat.format(java.util.Date())
+            onLog("[$timestamp] $msg")
+        }
+
+        log("INFO: Initializing real APK build pipeline for '${project.name}' (id=${project.id})")
+        val options = project.buildOptions
+        log("CONFIG: Build Variant: [${options.buildVariant.uppercase()}] | Minify: [${if (options.minifyEnabled) "ENABLED" else "DISABLED"}] | Crunch PNGs: [${if (options.crunchPngs) "ENABLED" else "DISABLED"}] | Debuggable: [${if (options.includeDebuggable) "INCLUDED" else "STRIPPED"}] | Shrink Resources: [${if (options.shrinkResources) "ENABLED" else "DISABLED"}] | Target SDK: [API ${options.targetSdk}] | Version: ${options.versionName} (${options.versionCode})")
+        if (options.minifyEnabled) {
+            log("INFO: ProGuard/R8 code minification & dead code elimination active")
+        }
+        if (options.crunchPngs) {
+            log("INFO: AAPT2 PNG crunching enabled for release drawables")
+        }
+        if (options.includeDebuggable) {
+            log("INFO: Setting android:debuggable=\"true\" in manifest for debugging")
+        } else {
+            log("INFO: Production manifest mode: android:debuggable=\"false\"")
+        }
+        if (options.bundledTfliteModels.isNotEmpty()) {
+            log("INFO: Selected ${options.bundledTfliteModels.size} TFLite model(s) for bundling: ${options.bundledTfliteModels.joinToString(", ")}")
+        }
         val apksDir = File(context.cacheDir, "apks").apply { mkdirs() }
         apksDir.listFiles()?.forEach { oldFile ->
             if (oldFile.isFile && oldFile.name.endsWith(".apk")) {
@@ -116,27 +153,36 @@ object ApkBuilder {
         runCatching {
             // Step 1: Copy base.apk from assets/base.apk to cacheDir
             onProgress("Copying template...")
+            log("INFO: Step 1/6: Copying base APK template from assets/base.apk...")
             copyBaseTemplateFromAssets(context, cachedBaseApk)
+            log("SUCCESS: Base APK template copied (${cachedBaseApk.length()} bytes)")
 
             // Step 2: Create config.json and patch AndroidManifest.xml preserving STORED vs DEFLATED
             onProgress("Injecting config...")
+            log("INFO: Step 2/6: Building config.json, bundling TFLite assets, and patching AndroidManifest.xml...")
             val configBytes = buildConfigJson(project).toByteArray(Charsets.UTF_8)
             injectConfigPreservingCompression(
+                context = context,
                 project = project,
                 sourceApk = cachedBaseApk,
                 targetApk = injectedApk,
-                configBytes = configBytes
+                configBytes = configBytes,
+                onLog = ::log
             )
+            log("SUCCESS: Configuration injected and manifest patched successfully")
 
             // Step 3: Zipalign to 4-byte boundaries
             onProgress("Aligning...")
+            log("INFO: Step 3/6: Aligning APK (zipalign 4-byte boundaries)...")
             alignApkWithZipFlinger(
                 sourceApk = injectedApk,
                 alignedApk = alignedApk
             )
+            log("SUCCESS: APK alignment completed successfully (${alignedApk.length()} bytes)")
 
             // Step 4: Sign with real Android ApkSigner (v1=true, v2=true, v3=false)
             onProgress("Signing...")
+            log("INFO: Step 4/6: Signing APK with Android ApkSigner (v1 + v2 scheme)...")
             signApkWithApkSigner(
                 context = context,
                 alignedApk = alignedApk,
@@ -146,21 +192,27 @@ object ApkBuilder {
             if (!signedApk.exists() || signedApk.length() == 0L) {
                 throw IllegalStateException("Signed APK output is empty")
             }
+            log("SUCCESS: APK signed successfully (${signedApk.length()} bytes)")
 
             // Step 5: Self-check with ApkVerifier before saving to Downloads
             onProgress("Verifying...")
+            log("INFO: Step 5/6: Verifying signature with com.android.apksig.ApkVerifier...")
             val verification = ApkVerifier.Builder(signedApk).build().verify()
             if (!verification.isVerified || !verification.isVerifiedUsingV2Scheme) {
                 signedApk.delete()
                 throw IllegalStateException("APK signature verification failed (v2 scheme required)")
             }
+            log("SUCCESS: APK signature verified successfully (v2 scheme valid)")
 
             // Step 6: Save final verified file to Downloads/AiAppStudio/{projectName}.apk
+            log("INFO: Step 6/6: Saving final signed APK to Downloads/AiAppStudio/$safeName.apk...")
             saveApkToDownloads(context, "$safeName.apk", signedApk.readBytes())
 
             onProgress("Done")
+            log("SUCCESS: APK build completed successfully! Ready for installation.")
             signedApk
-        }.onFailure {
+        }.onFailure { err ->
+            log("ERROR: Build failed - ${err.localizedMessage ?: err.toString()}")
             if (signedApk.exists()) {
                 signedApk.delete()
             }
@@ -184,11 +236,25 @@ object ApkBuilder {
         val screenDescriptions = ScreenSpecs.all(project).map { spec ->
             if (spec.purpose.isNotBlank()) "${spec.label} — ${spec.purpose}" else spec.label
         }
+        val options = project.buildOptions
         val config = ApkTemplateConfig(
             name = project.name,
             description = project.description,
             features = project.features,
-            screens = screenDescriptions
+            screens = screenDescriptions,
+            buildVariant = options.buildVariant,
+            minifyEnabled = options.minifyEnabled,
+            crunchPngs = options.crunchPngs,
+            includeDebuggable = options.includeDebuggable,
+            shrinkResources = options.shrinkResources,
+            targetSdk = options.targetSdk,
+            versionName = options.versionName,
+            versionCode = options.versionCode,
+            bundledTfliteModels = options.bundledTfliteModels.map {
+                TfliteModelManager.sanitizeTfliteFileName(it)
+            }.distinct(),
+            iconDrawableName = project.iconDrawableName,
+            iconBackgroundHex = project.iconBackgroundHex
         )
         return jsonFormatter.encodeToString(config)
     }
@@ -220,10 +286,12 @@ object ApkBuilder {
     }
 
     private fun injectConfigPreservingCompression(
+        context: Context,
         project: AppProject,
         sourceApk: File,
         targetApk: File,
-        configBytes: ByteArray
+        configBytes: ByteArray,
+        onLog: (String) -> Unit
     ) {
         if (targetApk.exists()) targetApk.delete()
 
@@ -235,6 +303,17 @@ object ApkBuilder {
             "Generated App" to appLabel
         )
 
+        val resolvedModels = linkedMapOf<String, File>()
+        project.buildOptions.bundledTfliteModels.distinct().forEach { requestedName ->
+            val safeModelName = TfliteModelManager.sanitizeTfliteFileName(requestedName)
+            val modelFile = TfliteModelManager.findModelFile(context, safeModelName)
+            if (modelFile != null && modelFile.isFile && modelFile.length() > 0L) {
+                resolvedModels["assets/models/$safeModelName"] = modelFile
+            } else {
+                onLog("WARN: Selected TFLite model '$requestedName' was not found on device; skipped.")
+            }
+        }
+
         ZipFile(sourceApk).use { zipFile ->
             ZipOutputStream(FileOutputStream(targetApk)).use { zipOut ->
                 val entries = zipFile.entries()
@@ -242,16 +321,17 @@ object ApkBuilder {
                     val entry = entries.nextElement()
                     val name = entry.name
 
-                    // Strip existing signatures and old config.json
+                    // Strip existing signatures, old config.json, and colliding model assets
                     if (entry.isDirectory ||
                         name == "assets/config.json" ||
+                        name in resolvedModels.keys ||
                         name.startsWith("META-INF/")
                     ) {
                         continue
                     }
 
-                    val rawBytes = zipFile.getInputStream(entry).use { it.readBytes() }
                     if (name == "AndroidManifest.xml") {
+                        val rawBytes = zipFile.getInputStream(entry).use { it.readBytes() }
                         val patchedManifest = AxmlPatcher.replaceStrings(rawBytes, manifestReplacements)
                         val deflatedManifest = ZipEntry(name).apply {
                             method = ZipEntry.DEFLATED
@@ -260,6 +340,7 @@ object ApkBuilder {
                         zipOut.write(patchedManifest)
                         zipOut.closeEntry()
                     } else if (entry.method == ZipEntry.STORED) {
+                        val rawBytes = zipFile.getInputStream(entry).use { it.readBytes() }
                         val crc = CRC32().apply { update(rawBytes) }
                         val storedEntry = ZipEntry(name).apply {
                             method = ZipEntry.STORED
@@ -275,7 +356,9 @@ object ApkBuilder {
                             method = ZipEntry.DEFLATED
                         }
                         zipOut.putNextEntry(deflatedEntry)
-                        zipOut.write(rawBytes)
+                        zipFile.getInputStream(entry).use { input ->
+                            input.copyTo(zipOut, bufferSize = 64 * 1024)
+                        }
                         zipOut.closeEntry()
                     }
                 }
@@ -287,8 +370,55 @@ object ApkBuilder {
                 zipOut.putNextEntry(configEntry)
                 zipOut.write(configBytes)
                 zipOut.closeEntry()
+
+                // Inject selected .tflite models as uncompressed STORED entries for AssetFileDescriptor mmap
+                resolvedModels.forEach { (assetPath, modelFile) ->
+                    val fileSize = modelFile.length()
+                    val crcValue = computeFileCrc32(modelFile)
+                    val modelEntry = ZipEntry(assetPath).apply {
+                        method = ZipEntry.STORED
+                        size = fileSize
+                        compressedSize = fileSize
+                        crc = crcValue
+                    }
+                    zipOut.putNextEntry(modelEntry)
+                    modelFile.inputStream().use { input ->
+                        input.copyTo(zipOut, bufferSize = 128 * 1024)
+                    }
+                    zipOut.closeEntry()
+                    onLog("INFO: Bundled TFLite model '$assetPath' (${TfliteModelManager.formatBytes(fileSize)}, STORED)")
+                }
+
+                // Bundle custom generated launcher icon PNG if present in project drawable resources
+                val customIconFile = ProjectDrawableInstaller.findInstalledPngFile(
+                    context = context,
+                    projectId = project.id,
+                    preferredDrawableName = project.iconDrawableName
+                )
+                if (customIconFile != null && customIconFile.isFile) {
+                    val iconEntry = ZipEntry("assets/custom_launcher_icon.png").apply {
+                        method = ZipEntry.DEFLATED
+                    }
+                    zipOut.putNextEntry(iconEntry)
+                    zipOut.write(customIconFile.readBytes())
+                    zipOut.closeEntry()
+                    onLog("INFO: Bundled generated launcher drawable '${customIconFile.name}' (${customIconFile.length()} bytes)")
+                }
             }
         }
+    }
+
+    private fun computeFileCrc32(file: File): Long {
+        val crc = CRC32()
+        val buffer = ByteArray(64 * 1024)
+        file.inputStream().use { input ->
+            while (true) {
+                val read = input.read(buffer)
+                if (read == -1) break
+                crc.update(buffer, 0, read)
+            }
+        }
+        return crc.value
     }
 
     /**
@@ -307,11 +437,32 @@ object ApkBuilder {
                     val entry = entries.nextElement()
                     if (entry.isDirectory) continue
 
-                    val entryBytes = zipFile.getInputStream(entry).use { it.readBytes() }
                     val nameBytes = entry.name.toByteArray(Charsets.UTF_8)
 
                     if (entry.method == ZipEntry.STORED) {
-                        val crc = CRC32().apply { update(entryBytes) }
+                        val entrySize = entry.size
+                        val entryCrc = entry.crc
+                        val resolvedSize: Long
+                        val resolvedCrc: Long
+                        if (entrySize >= 0L && entryCrc >= 0L) {
+                            resolvedSize = entrySize
+                            resolvedCrc = entryCrc
+                        } else {
+                            val crc = CRC32()
+                            var total = 0L
+                            val buf = ByteArray(64 * 1024)
+                            zipFile.getInputStream(entry).use { input ->
+                                while (true) {
+                                    val r = input.read(buf)
+                                    if (r == -1) break
+                                    crc.update(buf, 0, r)
+                                    total += r
+                                }
+                            }
+                            resolvedSize = total
+                            resolvedCrc = crc.value
+                        }
+
                         val alignment = if (entry.name.endsWith(".so")) 4096L else 4L
                         val unalignedDataOffset = countingOut.bytesWritten + 30L + nameBytes.size
                         val remainder = (unalignedDataOffset % alignment).toInt()
@@ -319,22 +470,26 @@ object ApkBuilder {
 
                         val storedEntry = ZipEntry(entry.name).apply {
                             method = ZipEntry.STORED
-                            size = entryBytes.size.toLong()
-                            compressedSize = entryBytes.size.toLong()
-                            this.crc = crc.value
+                            size = resolvedSize
+                            compressedSize = resolvedSize
+                            this.crc = resolvedCrc
                             if (paddingSize > 0) {
                                 extra = ByteArray(paddingSize)
                             }
                         }
                         zipOut.putNextEntry(storedEntry)
-                        zipOut.write(entryBytes)
+                        zipFile.getInputStream(entry).use { input ->
+                            input.copyTo(zipOut, bufferSize = 128 * 1024)
+                        }
                         zipOut.closeEntry()
                     } else {
                         val deflatedEntry = ZipEntry(entry.name).apply {
                             method = ZipEntry.DEFLATED
                         }
                         zipOut.putNextEntry(deflatedEntry)
-                        zipOut.write(entryBytes)
+                        zipFile.getInputStream(entry).use { input ->
+                            input.copyTo(zipOut, bufferSize = 64 * 1024)
+                        }
                         zipOut.closeEntry()
                     }
                 }
@@ -692,7 +847,7 @@ object ApkBuilder {
     /**
      * Builds a standard DER-encoded X.509v3 certificate valid for 25 years signed with SHA256withRSA.
      */
-    private fun generateSelfSignedX509Der(keyPair: KeyPair): ByteArray {
+    internal fun generateSelfSignedX509Der(keyPair: KeyPair): ByteArray {
         val now = System.currentTimeMillis()
         val notBefore = Date(now - 86_400_000L)
         val notAfter = Date(now + TWENTY_FIVE_YEARS_MS)

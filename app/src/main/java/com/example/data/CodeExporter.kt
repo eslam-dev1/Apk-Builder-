@@ -114,21 +114,51 @@ object CodeExporter {
      * 3. ProjectViewModel.kt
      * 4. README.md
      */
-    fun buildProjectZip(project: AppProject): ByteArray {
+    fun buildProjectZip(project: AppProject, context: Context? = null): ByteArray {
         val sanitizedScreens = getSanitizedScreenNames(project)
-        val filesMap = linkedMapOf(
+        val textFiles = linkedMapOf(
             "AppProject.kt" to buildModelFileContent(project),
             "ProjectScreens.kt" to buildScreensFileContent(project, sanitizedScreens),
             "ProjectViewModel.kt" to buildViewModelFileContent(project, sanitizedScreens),
             "README.md" to buildReadmeFileContent(project, sanitizedScreens)
         )
+        if (project.buildOptions.bundledTfliteModels.isNotEmpty()) {
+            textFiles["LocalTfliteRunner.kt"] = buildTfliteRunnerContent(project)
+        }
+
+        val installedPng = ProjectDrawableInstaller.findInstalledPngFile(
+            context = context,
+            projectId = project.id,
+            preferredDrawableName = project.iconDrawableName
+        )
+        val effectiveDrawableName = project.iconDrawableName.ifBlank {
+            installedPng?.nameWithoutExtension.orEmpty()
+        }
+        val effectiveBgHex = project.iconBackgroundHex.ifBlank { "#0B1120" }
+        if (effectiveDrawableName.isNotBlank()) {
+            val safeDrawable = ProjectDrawableInstaller.sanitizeDrawableName(effectiveDrawableName)
+            textFiles["res/drawable/ic_launcher_foreground.xml"] =
+                ProjectDrawableInstaller.buildAdaptiveForegroundXml(safeDrawable)
+            textFiles["res/drawable/ic_launcher_background.xml"] =
+                ProjectDrawableInstaller.buildAdaptiveBackgroundXml(effectiveBgHex)
+            textFiles["res/mipmap-anydpi-v26/ic_launcher.xml"] =
+                ProjectDrawableInstaller.buildAdaptiveMipmapXml()
+            textFiles["res/mipmap-anydpi-v26/ic_launcher_round.xml"] =
+                ProjectDrawableInstaller.buildAdaptiveMipmapXml()
+        }
 
         val byteOut = ByteArrayOutputStream()
         ZipOutputStream(byteOut).use { zipOut ->
-            filesMap.forEach { (fileName, content) ->
+            textFiles.forEach { (fileName, content) ->
                 val entry = ZipEntry(fileName)
                 zipOut.putNextEntry(entry)
                 zipOut.write(content.toByteArray(Charsets.UTF_8))
+                zipOut.closeEntry()
+            }
+            if (installedPng != null && installedPng.isFile) {
+                val pngEntryName = "res/drawable/${installedPng.name}"
+                zipOut.putNextEntry(ZipEntry(pngEntryName))
+                zipOut.write(installedPng.readBytes())
                 zipOut.closeEntry()
             }
         }
@@ -677,7 +707,7 @@ object CodeExporter {
     suspend fun saveZipToDownloads(context: Context, project: AppProject): Result<String> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val zipBytes = buildProjectZip(project)
+                val zipBytes = buildProjectZip(project, context = context)
                 val safeZipName = toSafeFileName(project.name) + ".zip"
                 saveBytesToDownloads(
                     context = context,
@@ -770,5 +800,62 @@ object CodeExporter {
                 word.replaceFirstChar { ch -> ch.uppercaseChar() }
             }
         return cleaned.ifBlank { "GeneratedApp" }
+    }
+
+    private fun buildTfliteRunnerContent(project: AppProject): String {
+        val models = project.buildOptions.bundledTfliteModels.distinct()
+        val firstModel = escapeKt(models.firstOrNull() ?: "model.tflite")
+        val modelListLiteral = models.joinToString(", ") { "\"models/${escapeKt(it)}\"" }
+        return buildString {
+            appendLine("package com.example.generated")
+            appendLine()
+            appendLine("import android.content.Context")
+            appendLine("import com.google.ai.edge.litert.Accelerator")
+            appendLine("import com.google.ai.edge.litert.CompiledModel")
+            appendLine("import com.google.ai.edge.litert.Environment")
+            appendLine("import com.google.ai.edge.litert.TensorBuffer")
+            appendLine("import java.io.File")
+            appendLine()
+            appendLine("/**")
+            appendLine(" * Auto-generated LiteRT CompiledModel helper for TFLite models bundled in assets/models/.")
+            appendLine(" */")
+            appendLine("class LocalTfliteRunner(")
+            appendLine("    context: Context,")
+            appendLine("    modelFileName: String = \"$firstModel\",")
+            appendLine("    accelerator: Accelerator = Accelerator.CPU")
+            appendLine(") : AutoCloseable {")
+            appendLine("    private val env = Environment.create()")
+            appendLine("    private val stagedFile = stageAsset(context, \"models/\$modelFileName\")")
+            appendLine("    private val model = CompiledModel.create(stagedFile.absolutePath, CompiledModel.Options(accelerator), env)")
+            appendLine("    private val inputs: List<TensorBuffer> = model.createInputBuffers()")
+            appendLine("    private val outputs: List<TensorBuffer> = model.createOutputBuffers()")
+            appendLine()
+            appendLine("    fun runFloatInference(inputData: FloatArray): FloatArray {")
+            appendLine("        inputs.firstOrNull()?.writeFloat(inputData)")
+            appendLine("        model.run(inputs, outputs)")
+            appendLine("        return outputs.firstOrNull()?.readFloat() ?: FloatArray(0)")
+            appendLine("    }")
+            appendLine()
+            appendLine("    override fun close() {")
+            appendLine("        (inputs + outputs).forEach { runCatching { it.close() } }")
+            appendLine("        runCatching { model.close() }")
+            appendLine("    }")
+            appendLine()
+            appendLine("    companion object {")
+            appendLine("        val BUNDLED_ASSET_PATHS = listOf($modelListLiteral)")
+            appendLine()
+            appendLine("        private fun stageAsset(context: Context, assetPath: String): File {")
+            appendLine("            val safeName = assetPath.substringAfterLast('/')")
+            appendLine("            val target = File(context.noBackupFilesDir, \"v1_\$safeName\")")
+            appendLine("            if (!target.isFile || target.length() == 0L) {")
+            appendLine("                context.assets.open(assetPath).use { input ->")
+            appendLine("                    target.outputStream().use { output -> input.copyTo(output) }")
+            appendLine("                }")
+            appendLine("            }")
+            appendLine("            return target")
+            appendLine("        }")
+            appendLine("    }")
+            appendLine("}")
+        }.trimEnd()
     }
 }

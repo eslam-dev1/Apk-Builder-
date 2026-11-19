@@ -36,6 +36,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.DeleteForever
@@ -95,6 +98,8 @@ import com.example.ai.ModelDownloadProgress
 import com.example.ai.ModelManager
 import com.example.ai.PreflightCheckResult
 import com.example.apk.ApkBuilder
+import com.example.apk.ReleaseBuildConfigManager
+import com.example.apk.ReleaseBuildFlags
 import com.example.data.BuildModeStrategy
 import com.example.data.CloudAiConfig
 import com.example.data.CloudAiProvider
@@ -113,6 +118,7 @@ fun SettingsScreen(
     totalProjectsCount: Int,
     onClearAllProjects: () -> Unit,
     onOpenModelStatus: () -> Unit = {},
+    onOpenEnvSetup: () -> Unit = {},
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -129,6 +135,8 @@ fun SettingsScreen(
     val currentOpenRouterModel by CloudAiConfig.openRouterModel.collectAsStateWithLifecycle()
     val buildModeStrategy by CloudAiConfig.buildModeStrategy.collectAsStateWithLifecycle()
     val isOfflineMode by CloudAiConfig.isOfflineMode.collectAsStateWithLifecycle()
+    val isDarkMode by CloudAiConfig.isDarkMode.collectAsStateWithLifecycle()
+    val isDynamicColor by CloudAiConfig.isDynamicColor.collectAsStateWithLifecycle()
 
     var openRouterKeyDraft by remember(savedOpenRouterKey) { mutableStateOf(savedOpenRouterKey) }
     var showOpenRouterKey by remember { mutableStateOf(false) }
@@ -147,6 +155,7 @@ fun SettingsScreen(
     var pendingExportUri by remember { mutableStateOf<Uri?>(null) }
     var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
     var pkcs12Password by remember { mutableStateOf("") }
+    var releaseFlags by remember { mutableStateOf(ReleaseBuildConfigManager.loadSavedFlags(context)) }
 
     LaunchedEffect(Unit) {
         CloudAiConfig.load(context)
@@ -560,6 +569,84 @@ fun SettingsScreen(
                         )
                     }
 
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+
+                    // Dark Mode Switch Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = if (isDarkMode) Icons.Default.DarkMode else Icons.Default.WbSunny,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Column {
+                                Text(
+                                    text = "Dark Theme",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = "Toggle dark/light color scheme",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = isDarkMode,
+                            onCheckedChange = { enabled ->
+                                CloudAiConfig.setDarkMode(context, enabled)
+                            },
+                            modifier = Modifier.testTag("settings_dark_mode_switch")
+                        )
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+
+                    // Material 3 Dynamic Color Switch Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Palette,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Column {
+                                Text(
+                                    text = "Material 3 Dynamic Color",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = "Use system color palette on Android 12+",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = isDynamicColor,
+                            onCheckedChange = { enabled ->
+                                CloudAiConfig.setDynamicColor(context, enabled)
+                            },
+                            modifier = Modifier.testTag("settings_dynamic_color_switch")
+                        )
+                    }
+
                     // Default Build Strategy (Auto vs Offline vs Cloud)
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
@@ -628,11 +715,13 @@ fun SettingsScreen(
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
 
+                    val isGeminiOverrideActive = CloudAiConfig.hasUserSavedGeminiKey()
                     val isOpenRouterConfigured = !CloudAiConfig.isOpenRouterKeyMissing()
+                    val effectiveGeminiConfigured = isApiKeyConfigured || !CloudAiConfig.isGeminiKeyMissing()
                     val effectiveActiveKeyConfigured = if (activeProvider == CloudAiProvider.OPENROUTER) {
                         isOpenRouterConfigured
                     } else {
-                        isApiKeyConfigured
+                        effectiveGeminiConfigured
                     }
 
                     Row(
@@ -655,7 +744,11 @@ fun SettingsScreen(
                                     style = MaterialTheme.typography.titleMedium
                                 )
                                 Text(
-                                    text = "Active provider: ${activeProvider.displayName}",
+                                    text = if (isGeminiOverrideActive && activeProvider == CloudAiProvider.GEMINI) {
+                                        "Active provider: Gemini (.env override)"
+                                    } else {
+                                        "Active provider: ${activeProvider.displayName}"
+                                    },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -694,6 +787,21 @@ fun SettingsScreen(
                                 )
                             }
                         }
+                    }
+
+                    FilledTonalButton(
+                        onClick = onOpenEnvSetup,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_open_env_setup_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Key,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Guided .env Setup Wizard (API & Signing Keys)")
                     }
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
@@ -1222,6 +1330,30 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            // Section C: Studio Default Release Build Settings
+            ReleaseBuildSettingsPanel(
+                minifyEnabled = releaseFlags.minifyEnabled,
+                crunchPngs = releaseFlags.crunchPngs,
+                onMinifyEnabledChange = { enabled ->
+                    releaseFlags = releaseFlags.copy(minifyEnabled = enabled)
+                    ReleaseBuildConfigManager.saveFlags(context, releaseFlags)
+                },
+                onCrunchPngsChange = { enabled ->
+                    releaseFlags = releaseFlags.copy(crunchPngs = enabled)
+                    ReleaseBuildConfigManager.saveFlags(context, releaseFlags)
+                },
+                onSaveWorkspaceDefaults = {
+                    val savedFile = ReleaseBuildConfigManager.saveFlags(context, releaseFlags)
+                    Toast.makeText(
+                        context,
+                        "Saved release defaults (${savedFile.name})",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                },
+                tagPrefix = "settings_",
+                showGradlePreviewInitially = false
+            )
 
             Spacer(modifier = Modifier.height(4.dp))
 
