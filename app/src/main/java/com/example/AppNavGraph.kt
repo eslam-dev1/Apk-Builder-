@@ -49,6 +49,7 @@ import com.example.screens.CreateScreen
 import com.example.screens.DependencyGraphScreen
 import com.example.screens.EnvSetupScreen
 import com.example.screens.HomeScreen
+import com.example.screens.KeystoreManagerScreen
 import com.example.screens.LintAuditScreen
 import com.example.screens.LivePreviewScreen
 import com.example.screens.LocalAiManagerScreen
@@ -74,6 +75,7 @@ const val ROUTE_LINT_AUDIT_FOR_PROJECT = "lintAudit/{projectId}"
 const val ROUTE_DEPENDENCY_GRAPH = "dependencyGraph"
 const val ROUTE_DEPENDENCY_GRAPH_FOR_PROJECT = "dependencyGraph/{projectId}"
 const val ROUTE_ENV_SETUP = "envSetup"
+const val ROUTE_KEYSTORE_MANAGER = "keystoreManager"
 const val ROUTE_PROJECTS = "projects"
 const val ROUTE_DETAILS = "details/{projectId}"
 const val ROUTE_BUILD_CONFIG = "buildConfig/{projectId}"
@@ -256,6 +258,7 @@ fun AppNavGraph() {
                         onLintAuditClick = { navController.navigate(ROUTE_LINT_AUDIT) },
                         onDependencyGraphClick = { navController.navigate(ROUTE_DEPENDENCY_GRAPH) },
                         onEnvSetupClick = { navController.navigate(ROUTE_ENV_SETUP) },
+                        onKeystoreManagerClick = { navController.navigate(ROUTE_KEYSTORE_MANAGER) },
                         onOpenProject = { projectId ->
                             generateViewModel.clearError()
                             navController.navigate("details/$projectId")
@@ -412,6 +415,9 @@ fun AppNavGraph() {
                         },
                         onOpenEnvSetup = {
                             navController.navigate(ROUTE_ENV_SETUP)
+                        },
+                        onOpenKeystoreManager = {
+                            navController.navigate(ROUTE_KEYSTORE_MANAGER)
                         },
                         onBack = { navController.popBackStack() }
                     )
@@ -646,6 +652,12 @@ fun AppNavGraph() {
                     )
                 }
 
+                composable(ROUTE_KEYSTORE_MANAGER) {
+                    KeystoreManagerScreen(
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+
                 composable(ROUTE_SETTINGS) {
                     SettingsScreen(
                         isApiKeyConfigured = generateViewModel.isApiKeyConfigured(),
@@ -653,6 +665,7 @@ fun AppNavGraph() {
                         onClearAllProjects = { generateViewModel.clearAllProjects() },
                         onOpenModelStatus = { navController.navigate(ROUTE_MODEL_STATUS) },
                         onOpenEnvSetup = { navController.navigate(ROUTE_ENV_SETUP) },
+                        onOpenKeystoreManager = { navController.navigate(ROUTE_KEYSTORE_MANAGER) },
                         // Back from Settings always goes to Home
                         onBack = {
                             navController.navigate(ROUTE_HOME) {

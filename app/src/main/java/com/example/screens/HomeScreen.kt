@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.WbSunny
@@ -77,6 +78,7 @@ fun HomeScreen(
     onLintAuditClick: () -> Unit = {},
     onDependencyGraphClick: () -> Unit = {},
     onEnvSetupClick: () -> Unit = {},
+    onKeystoreManagerClick: () -> Unit = {},
     onOpenProject: (String) -> Unit = {},
     onSettingsClick: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -420,6 +422,31 @@ fun HomeScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedButton(
+                onClick = onKeystoreManagerClick,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.7f)),
+                contentPadding = PaddingValues(vertical = 12.dp, horizontal = 14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("home_keystore_manager_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Security,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Release Keystore & APK Signing Manager",
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
 
             Spacer(modifier = Modifier.height(20.dp))

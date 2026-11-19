@@ -77,6 +77,7 @@ fun SigningSummaryCard(
     overrideReport: SigningSummaryReport? = null,
     onValidationReportChanged: (SigningSummaryReport?) -> Unit = {},
     onOpenEnvSetup: (() -> Unit)? = null,
+    onOpenKeystoreManager: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -424,6 +425,24 @@ fun SigningSummaryCard(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Re-validate")
+                }
+
+                if (onOpenKeystoreManager != null) {
+                    FilledTonalButton(
+                        onClick = onOpenKeystoreManager,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("signing_open_keystore_manager_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VerifiedUser,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Keystore Manager")
+                    }
                 }
 
                 if (onOpenEnvSetup != null) {

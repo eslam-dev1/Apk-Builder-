@@ -126,17 +126,18 @@ object KeystoreValidator {
             File(context.filesDir, ".env")
         )
         val localDotEnv = candidateDotEnvFiles.firstOrNull { it.isFile && it.length() > 0L }
-        return if (localDotEnv != null) {
-            runCatching {
+        if (localDotEnv != null) {
+            return runCatching {
                 parseDotEnv(
                     raw = localDotEnv.readText(),
                     fallback = buildConfigValues,
                     sourceLabel = ".env (Device Override)"
                 )
             }.getOrDefault(buildConfigValues)
-        } else {
-            buildConfigValues
         }
+
+        val vaultConfig = ReleaseKeystoreManager.loadActiveEnvSigningConfig(context)
+        return vaultConfig ?: buildConfigValues
     }
 
     internal fun readFromBuildConfig(): EnvSigningConfig {
@@ -206,14 +207,19 @@ object KeystoreValidator {
             addIfJks(File(File(context.filesDir, "apk_signing"), fileNameOnly))
         }
 
-        // 2. Scan managed keystore directory and app filesDir for existing .jks files
+        // 2. Scan managed keystore directory and app filesDir for existing .jks / .keystore files
         listOf(
             keystoreDir(context),
             File(context.filesDir, "apk_signing"),
             context.filesDir
         ).forEach { dir ->
             dir.listFiles()
-                ?.filter { it.isFile && it.name.endsWith(".jks", ignoreCase = true) }
+                ?.filter {
+                    it.isFile &&
+                        !it.name.startsWith(".") &&
+                        (it.name.endsWith(".jks", ignoreCase = true) ||
+                            it.name.endsWith(".keystore", ignoreCase = true))
+                }
                 ?.sortedBy { it.name.lowercase(Locale.US) }
                 ?.forEach { addIfJks(it) }
         }

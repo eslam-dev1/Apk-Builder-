@@ -2226,4 +2226,255 @@ class ExampleRobolectricTest {
         assertTrue(roundtrip.crunchPngs)
         assertEquals("release", roundtrip.buildVariant)
     }
+
+    @Test
+    fun `releaseKeystoreManager generates random credentials, encrypts vault, prevents unconfirmed overwrite, backs up, and passes ApkVerifier`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.apk.ReleaseKeystoreManager.deleteActiveKeystore(context)
+        val dotEnvFile = com.example.apk.DotEnvConfigManager.workspaceDotEnvFile(context)
+        val backupFile = java.io.File(context.cacheDir, "backup_test_release.jks")
+
+        try {
+            // 1. Generate brand-new release keystore automatically
+            val generatedInfo = com.example.apk.ReleaseKeystoreManager.generateNewReleaseKeystore(
+                context = context,
+                allowOverwrite = false
+            ).getOrThrow()
+
+            assertTrue(generatedInfo.fileName.endsWith(".jks"))
+            assertTrue(java.io.File(generatedInfo.keystorePath).isFile)
+            assertTrue(generatedInfo.keyAlias.startsWith("release_"))
+            assertTrue(generatedInfo.hasEnvVariablesConfigured)
+            org.junit.Assert.assertFalse(generatedInfo.isBackedUp)
+            assertTrue(generatedInfo.sha256Fingerprint.contains(":"))
+
+            // 2. Verify secure random credentials are distinct & NEVER stored in plaintext in the vault file
+            val envCfg = com.example.apk.ReleaseKeystoreManager.loadActiveEnvSigningConfig(context)
+            assertNotNull(envCfg)
+            assertTrue(envCfg!!.storePassword.length >= 24)
+            assertTrue(envCfg.keyPassword.length >= 24)
+            assertTrue(envCfg.keyAlias == generatedInfo.keyAlias)
+
+            val rawVaultText = com.example.apk.ReleaseKeystoreManager.vaultFile(context)
+                .readBytes()
+                .toString(Charsets.ISO_8859_1)
+            org.junit.Assert.assertFalse("Store password must NEVER appear in plaintext on disk", rawVaultText.contains(envCfg.storePassword))
+            org.junit.Assert.assertFalse("Key password must NEVER appear in plaintext on disk", rawVaultText.contains(envCfg.keyPassword))
+
+            // 3. Masked env snippet hides passwords by default
+            val maskedSnippet = com.example.apk.ReleaseKeystoreManager.formatEnvSnippet(context, revealPasswords = false)
+            assertNotNull(maskedSnippet)
+            org.junit.Assert.assertFalse(maskedSnippet!!.contains(envCfg.storePassword))
+            org.junit.Assert.assertFalse(maskedSnippet.contains(envCfg.keyPassword))
+            assertTrue(maskedSnippet.contains("KEYSTORE_PATH="))
+            assertTrue(maskedSnippet.contains("STORE_PASSWORD="))
+            assertTrue(maskedSnippet.contains("KEY_ALIAS="))
+            assertTrue(maskedSnippet.contains("KEY_PASSWORD="))
+
+            // 4. Overwrite protection: refuses to overwrite without confirmation
+            val overwriteAttempt = com.example.apk.ReleaseKeystoreManager.generateNewReleaseKeystore(
+                context = context,
+                allowOverwrite = false
+            )
+            assertTrue(overwriteAttempt.isFailure)
+            assertTrue(overwriteAttempt.exceptionOrNull() is com.example.apk.KeystoreAlreadyExistsException)
+
+            // 5. KeystoreValidator integrates seamlessly with the encrypted vault
+            dotEnvFile.delete()
+            val summary = com.example.apk.KeystoreValidator.evaluateSigningSummary(
+                context = context,
+                targetVariant = com.example.model.BuildVariant.RELEASE
+            )
+            assertEquals(com.example.apk.SigningOverallStatus.VALID, summary.overallStatus)
+
+            // 6. End-to-end Test Signing Configuration (ApkSigner + ApkVerifier v1/v2/v3)
+            val report = com.example.apk.ReleaseKeystoreManager.testSigningConfiguration(context)
+            assertTrue("Expected testSigningConfiguration to pass: ${report.summary}", report.passed)
+            assertTrue(report.keystoreUnlocked)
+            assertTrue(report.keypairVerified)
+            assertTrue(report.apkSigned)
+            assertTrue(report.apkVerified)
+            assertTrue(report.verifiedV1)
+            assertTrue(report.verifiedV2)
+            assertTrue(report.verifiedV3)
+            assertEquals(generatedInfo.sha256Fingerprint, report.signerSha256)
+
+            // 7. Backup & re-import verification
+            val backupUri = android.net.Uri.fromFile(backupFile)
+            val backedUpInfo = com.example.apk.ReleaseKeystoreManager.backupKeystoreToUri(context, backupUri).getOrThrow()
+            assertTrue(backedUpInfo.isBackedUp)
+            assertTrue(backupFile.isFile && backupFile.length() > 0L)
+
+            // 8. Confirmed overwrite succeeds with new alias
+            val replacedInfo = com.example.apk.ReleaseKeystoreManager.generateNewReleaseKeystore(
+                context = context,
+                config = com.example.apk.KeystoreGenerationConfig(keyAlias = "upload"),
+                allowOverwrite = true
+            ).getOrThrow()
+            assertEquals("upload", replacedInfo.keyAlias)
+            assertTrue(replacedInfo.isGradleAliasCompatible)
+            assertTrue(replacedInfo.sha256Fingerprint != generatedInfo.sha256Fingerprint)
+        } finally {
+            com.example.apk.ReleaseKeystoreManager.deleteActiveKeystore(context)
+            backupFile.delete()
+            dotEnvFile.delete()
+        }
+    }
+
+    @Test
+    fun `apkBuilder release variant auto-generates keystore, signs APK, passes ApkVerifier, and never leaks passwords in logs`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.apk.ReleaseKeystoreManager.deleteActiveKeystore(context)
+
+        val releaseProject = AppProject(
+            id = "proj_release_auto_sign",
+            name = "ReleaseSignDemo",
+            description = "Signed release APK test",
+            prompt = "Offline release test",
+            createdAt = 1000L,
+            buildOptions = com.example.model.BuildOptions(
+                buildVariant = "release",
+                minifyEnabled = true,
+                crunchPngs = true,
+                includeDebuggable = false,
+                signingScheme = "v1+v2"
+            )
+        )
+
+        var builtApk: java.io.File? = null
+        try {
+            val capturedLogs = mutableListOf<String>()
+            val resultFile = com.example.apk.ApkBuilder.buildApk(
+                project = releaseProject,
+                context = context,
+                onLog = { line -> capturedLogs += line },
+                onProgress = { _ -> }
+            ).getOrThrow()
+
+            builtApk = resultFile
+            assertTrue("Signed release APK must exist", resultFile.isFile && resultFile.length() > 0L)
+            assertTrue("Release APK filename should end with -release.apk", resultFile.name.endsWith("-release.apk"))
+
+            // Confirm active release keystore was auto-created and persisted
+            val activeInfo = com.example.apk.ReleaseKeystoreManager.getActiveKeystoreInfo(context)
+            assertNotNull("Release keystore should be auto-generated", activeInfo)
+            val envCfg = com.example.apk.ReleaseKeystoreManager.loadActiveEnvSigningConfig(context)
+            assertNotNull(envCfg)
+
+            // Security check: ZERO password leakage in build logs
+            val allLogs = capturedLogs.joinToString("\n")
+            org.junit.Assert.assertFalse("Store password must NEVER appear in logs", allLogs.contains(envCfg!!.storePassword))
+            org.junit.Assert.assertFalse("Key password must NEVER appear in logs", allLogs.contains(envCfg.keyPassword))
+
+            // Cryptographic Android ApkVerifier verification (v1 + v2 + v3 + cert match)
+            val verification = com.android.apksig.ApkVerifier.Builder(resultFile)
+                .setMinCheckedPlatformVersion(23)
+                .build()
+                .verify()
+            assertTrue("Release APK must verify cleanly with ApkVerifier", verification.isVerified)
+            assertTrue("Release APK must be verified with V1 scheme", verification.isVerifiedUsingV1Scheme)
+            assertTrue("Release APK must be verified with V2 scheme", verification.isVerifiedUsingV2Scheme)
+            assertTrue("Release APK must be verified with V3 scheme", verification.isVerifiedUsingV3Scheme)
+            assertTrue("ApkVerifier errors must be empty", verification.errors.isEmpty())
+
+            val actualSignerSha256 = com.example.apk.ApkBuilder.formatSha256Fingerprint(
+                verification.signerCertificates.first().encoded
+            )
+            assertEquals(activeInfo!!.sha256Fingerprint, actualSignerSha256)
+        } finally {
+            builtApk?.delete()
+            com.example.apk.ReleaseKeystoreManager.deleteActiveKeystore(context)
+        }
+    }
+
+    @Test
+    fun `keystore persists across simulated app restart and continues to pass ApkVerifier`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.apk.ReleaseKeystoreManager.deleteActiveKeystore(context)
+
+        try {
+            // Session 1: Generate release keystore
+            val initialInfo = com.example.apk.ReleaseKeystoreManager.generateNewReleaseKeystore(
+                context = context,
+                allowOverwrite = false
+            ).getOrThrow()
+
+            // Simulate cold restart by reading exclusively from persistent filesDir storage in a fresh Application context reference
+            val restartedContext = ApplicationProvider.getApplicationContext<Context>()
+            assertTrue("Keystore file must persist on disk across restarts", java.io.File(initialInfo.keystorePath).isFile)
+            assertTrue("Encrypted vault must persist on disk across restarts", com.example.apk.ReleaseKeystoreManager.vaultFile(restartedContext).isFile)
+
+            val reloadedInfo = com.example.apk.ReleaseKeystoreManager.getActiveKeystoreInfo(restartedContext)
+            assertNotNull("Active keystore info must reload after restart", reloadedInfo)
+            assertEquals(initialInfo.fileName, reloadedInfo!!.fileName)
+            assertEquals(initialInfo.keyAlias, reloadedInfo.keyAlias)
+            assertEquals(initialInfo.sha256Fingerprint, reloadedInfo.sha256Fingerprint)
+            assertTrue(reloadedInfo.hasEnvVariablesConfigured)
+
+            // Confirm signing & ApkVerifier still succeed seamlessly after restart
+            val postRestartReport = com.example.apk.ReleaseKeystoreManager.testSigningConfiguration(restartedContext)
+            assertTrue("Signing test must pass after app restart: ${postRestartReport.summary}", postRestartReport.passed)
+            assertTrue(postRestartReport.apkSigned && postRestartReport.apkVerified)
+            assertEquals(initialInfo.sha256Fingerprint, postRestartReport.signerSha256)
+        } finally {
+            com.example.apk.ReleaseKeystoreManager.deleteActiveKeystore(context)
+        }
+    }
+
+    @Test
+    fun `keystoreManagerScreen generates keystore, displays info and env checklist, tests signing, and requires overwrite confirmation`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.apk.ReleaseKeystoreManager.deleteActiveKeystore(context)
+
+        try {
+            composeTestRule.setContent {
+                com.example.ui.theme.MyApplicationTheme {
+                    com.example.screens.KeystoreManagerScreen(onBack = {})
+                }
+            }
+
+            composeTestRule.waitUntil(timeoutMillis = 5_000) {
+                composeTestRule.onAllNodes(hasTestTag("keystore_empty_state"))
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            composeTestRule.onNodeWithTag("keystore_manager_title").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("keystore_backup_warning_banner").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("keystore_empty_state").performScrollTo().assertIsDisplayed()
+
+            // Generate a new release keystore through the UI
+            composeTestRule.onNodeWithTag("keystore_generate_button").performScrollTo().performClick()
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("keystore_confirm_generate_button").performClick()
+
+            composeTestRule.waitUntil(timeoutMillis = 15_000) {
+                composeTestRule.onAllNodes(hasTestTag("keystore_active_badge"))
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            composeTestRule.onNodeWithTag("keystore_active_badge").performScrollTo().assertIsDisplayed()
+            composeTestRule.onNodeWithTag("keystore_info_alias").performScrollTo().assertIsDisplayed()
+            composeTestRule.onNodeWithTag("keystore_env_vars_status_panel").performScrollTo().assertIsDisplayed()
+
+            // Test signing configuration via UI button and assert VERIFIED report renders
+            composeTestRule.onNodeWithTag("keystore_test_signing_button").performScrollTo().performClick()
+            composeTestRule.waitUntil(timeoutMillis = 15_000) {
+                composeTestRule.onAllNodes(hasTestTag("keystore_test_report_badge"))
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            composeTestRule.onNodeWithTag("keystore_test_report_badge")
+                .performScrollTo()
+                .assertTextContains("VERIFIED", substring = false)
+
+            // Tapping Generate again when a keystore exists MUST show Overwrite Confirmation Dialog
+            composeTestRule.onNodeWithTag("keystore_generate_button").performScrollTo().performClick()
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("keystore_confirm_generate_button").performClick()
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("keystore_overwrite_confirm_dialog").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("keystore_cancel_overwrite_button").performClick()
+            composeTestRule.waitForIdle()
+        } finally {
+            com.example.apk.ReleaseKeystoreManager.deleteActiveKeystore(context)
+        }
+    }
 }
+

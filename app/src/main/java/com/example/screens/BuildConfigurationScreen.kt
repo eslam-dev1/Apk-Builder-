@@ -98,6 +98,7 @@ fun BuildConfigurationScreen(
     onOpenLintAudit: (() -> Unit)? = null,
     onOpenDependencyGraph: (() -> Unit)? = null,
     onOpenEnvSetup: (() -> Unit)? = null,
+    onOpenKeystoreManager: (() -> Unit)? = null,
     overrideSigningReport: SigningSummaryReport? = null,
     modifier: Modifier = Modifier
 ) {
@@ -680,7 +681,8 @@ fun BuildConfigurationScreen(
                 signingScheme = signingScheme,
                 overrideReport = overrideSigningReport,
                 onValidationReportChanged = { signingReport = it },
-                onOpenEnvSetup = onOpenEnvSetup
+                onOpenEnvSetup = onOpenEnvSetup,
+                onOpenKeystoreManager = onOpenKeystoreManager
             )
 
             // Offline TFLite Models Bundling Card

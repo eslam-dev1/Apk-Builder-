@@ -119,6 +119,7 @@ fun SettingsScreen(
     onClearAllProjects: () -> Unit,
     onOpenModelStatus: () -> Unit = {},
     onOpenEnvSetup: () -> Unit = {},
+    onOpenKeystoreManager: () -> Unit = {},
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1327,6 +1328,21 @@ fun SettingsScreen(
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Import")
                         }
+                    }
+
+                    OutlinedButton(
+                        onClick = onOpenKeystoreManager,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_open_keystore_manager_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Security,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Release Keystore & Signing Manager")
                     }
                 }
             }

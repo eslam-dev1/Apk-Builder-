@@ -281,3 +281,24 @@ data class TabBuildPreference(
         }
     }
 }
+
+data class PotentialFeature(
+    val title: String,
+    val summary: String = "",
+    val priority: String = "MVP",
+    val category: String = ""
+)
+
+data class CodeFileBlueprint(
+    val path: String,
+    val purpose: String = "",
+    val code: String = ""
+)
+
+data class ProjectCodeStructure(
+    val architecturePattern: String = "MVVM + Jetpack Compose",
+    val packageName: String = "com.example.generated",
+    val dependencies: List<String> = emptyList(),
+    val files: List<CodeFileBlueprint> = emptyList()
+)
+
